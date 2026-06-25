@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Snapshot Keeper</title>
+    <link rel="stylesheet" href="options.css">
+  </head>
+  <body>
+    <main>
+      <h1>Snapshot Keeper</h1>
+      <section>
+        <h2>저장 범위</h2>
+        <p>저장하는 것: assistant 답변 안의 SNAPSHOT_START turn=n / SNAPSHOT_END 사이 텍스트.</p>
+        <p>저장하지 않는 것: 사용자 질문 전체, 일반 답변 전체, 입력창 내용.</p>
+      </section>
+      <section>
+        <h2>저장 위치</h2>
+        <p>플로팅바의 Set folder로 선택한 폴더를 root로 보고, 그 아래 월/session 상대경로로 저장합니다.</p>
+      </section>
+      <section>
+        <h2>권한 사용</h2>
+        <ul>
+          <li>storage: 대화별 상태 장부 저장</li>
+          <li>tabs: 현재 탭 상태 확인</li>
+          <li>webNavigation: ChatGPT SPA 이동 감지와 navigationEpoch 갱신</li>
+        </ul>
+      </section>
+      <section>
+        <h2>필수 개인 지침</h2>
+        <pre><code>모든 assistant 답변 시작에 ## turn=n을 붙인다.
+10턴마다 아래 형식의 스냅샷을 생성한다.
+
+SNAPSHOT_START turn=n
+### 현재 진행 중인 주제
+### 새로 확정된 사항
+### 미확정 사항
+### 제외된 주제 (1회 기록)
+### 앞으로 할 일
+SNAPSHOT_END
+
+모든 답변 끝에는 대한민국 기준 시각: YYYY.MM.DD(요일) HH:MM 형식의 줄을 붙인다.</code></pre>
+      </section>
+    </main>
+  </body>
+</html>

@@ -1,0 +1,6 @@
+2026-*/
+ChatGPT-Snapshots/
+_qa/
+*.log
+Thumbs.db
+.DS_Store
