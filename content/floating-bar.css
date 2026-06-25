@@ -32,12 +32,14 @@
 }
 
 #snapshot-keeper-bar .sk-compact-waiting,
-#snapshot-keeper-bar .sk-compact-empty {
+#snapshot-keeper-bar .sk-compact-empty,
+#snapshot-keeper-bar .sk-compact-rescanning {
   display: none;
 }
 
 #snapshot-keeper-bar[data-compact-state="waiting"] .sk-compact-ready,
-#snapshot-keeper-bar[data-compact-state="empty"] .sk-compact-ready {
+#snapshot-keeper-bar[data-compact-state="empty"] .sk-compact-ready,
+#snapshot-keeper-bar[data-compact-state="rescanning"] .sk-compact-ready {
   display: none;
 }
 
@@ -46,6 +48,10 @@
 }
 
 #snapshot-keeper-bar[data-compact-state="empty"] .sk-compact-empty {
+  display: inline;
+}
+
+#snapshot-keeper-bar[data-compact-state="rescanning"] .sk-compact-rescanning {
   display: inline;
 }
 

@@ -335,7 +335,18 @@ async function recordTurnSeen(tabId, payload) {
     }
 
     const conversation = ensureConversation(state, bindingCheck.conversationKey);
-    updateVisibleTurn(state, tabId, bindingCheck.conversationKey, Number(payload.turn), payload.source || null);
+    if (payload.source === "latest") {
+      updateVisibleTurn(state, tabId, bindingCheck.conversationKey, Number(payload.turn), payload.source || null);
+    } else {
+      appendEvent(state, {
+        type: "visible_turn_skipped",
+        conversationKey: conversation.conversationKey,
+        tabId,
+        turn: Number(payload.turn),
+        source: payload.source || null,
+        reason: "non_live_turn_seen"
+      });
+    }
     updateLastSeenTurn(state, conversation, Number(payload.turn), tabId);
     appendEvent(state, {
       type: "turn_seen",

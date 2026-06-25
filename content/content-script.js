@@ -13,6 +13,7 @@
   const DISMISSED_TOAST_LIMIT = 300;
   const PARSE_RETRY_DELAY_MS = 1500;
   const PARSE_RETRY_LIMIT = 80;
+  const WAITING_DISPLAY_TTL_MS = 9000;
   const SETTINGS_DB_NAME = "snapshot-keeper-settings-db";
   const SETTINGS_STORE = "settings";
   const SAVE_DIRECTORY_HANDLE_KEY = "snapshot-save-directory-handle";
@@ -46,6 +47,9 @@
   let refreshTimer;
   let watchdogTimer;
   let anchorTimer;
+  let waitingTimer;
+  let rescanEndTimer;
+  let manualRescanActive = false;
   let extensionStale = false;
   let saveDirectoryHandle = null;
   let saveDirectoryName = "";
@@ -98,14 +102,14 @@
     if (!mutation) {
       return false;
     }
-    if (isExtensionUiNode(mutation.target)) {
+    if (isIgnoredMutationNode(mutation.target)) {
       return false;
     }
     const addedNodes = [...mutation.addedNodes || []];
     if (addedNodes.length > 0) {
-      return addedNodes.some((node) => !isExtensionUiNode(node));
+      return addedNodes.some((node) => isAssistantMutationNode(node));
     }
-    return true;
+    return isAssistantMutationNode(mutation.target);
   }
 
   function isExtensionUiNode(node) {
@@ -114,6 +118,33 @@
     }
     const element = node.nodeType === Node.ELEMENT_NODE ? node : node.parentElement || node.parentNode;
     return Boolean(element?.closest?.("#snapshot-keeper-bar, .snapshot-keeper-notice"));
+  }
+
+  function isIgnoredMutationNode(node) {
+    if (!node) {
+      return true;
+    }
+    const element = node.nodeType === Node.ELEMENT_NODE ? node : node.parentElement || node.parentNode;
+    if (!element) {
+      return true;
+    }
+    if (isExtensionUiNode(element)) {
+      return true;
+    }
+    return Boolean(element.closest?.(
+      "textarea, input, form, [contenteditable='true'], [data-message-author-role='user']"
+    ));
+  }
+
+  function isAssistantMutationNode(node) {
+    if (!node) {
+      return false;
+    }
+    const element = node.nodeType === Node.ELEMENT_NODE ? node : node.parentElement || node.parentNode;
+    if (!element || isIgnoredMutationNode(element)) {
+      return false;
+    }
+    return Boolean(element.matches?.("[data-message-author-role='assistant']") || element.querySelector?.("[data-message-author-role='assistant']") || element.closest?.("[data-message-author-role='assistant']"));
   }
 
   function startWatchdog() {
@@ -170,9 +201,6 @@
     if (extensionStale) {
       return;
     }
-    if (source === "live") {
-      renderStatus({ waiting: true, recentText: "waiting for response", mode: "pending" });
-    }
     window.clearTimeout(refreshTimer);
     refreshTimer = window.setTimeout(() => {
       inspectLatestAssistantMessage(source).catch(handleAsyncError);
@@ -189,7 +217,7 @@
     }
     const latest = nodes[nodes.length - 1];
     if (!latest) {
-      renderStatus({ recentText: "assistant message not found" });
+      clearWaitingDisplay({ recentText: "assistant message not found" });
       return;
     }
     debugLog("[SK live] candidate node found", { source, totalCandidates: nodes.length });
@@ -201,12 +229,21 @@
       renderStatus({ recentText: "extension reloaded · refresh tab", mode: "error" });
       return;
     }
-    const visibleNodes = getAssistantMessageCandidates().filter(isVisible);
-    debugLog("[SK scan] visible assistant count", { count: visibleNodes.length, source: "manual_rescan" });
-    for (const node of visibleNodes) {
-      await inspectNodeWhenStable(node, "manual_rescan");
+    window.clearTimeout(rescanEndTimer);
+    manualRescanActive = true;
+    renderStatus({ compactState: "rescanning", recentText: "rescanning visible snapshots", mode: "pending" });
+    try {
+      const visibleNodes = getAssistantMessageCandidates().filter(isVisible);
+      debugLog("[SK scan] visible assistant count", { count: visibleNodes.length, source: "manual_rescan" });
+      for (const node of visibleNodes) {
+        await inspectNodeWhenStable(node, "manual_rescan");
+      }
+    } finally {
+      rescanEndTimer = window.setTimeout(() => {
+        manualRescanActive = false;
+        refreshStatus();
+      }, 500);
     }
-    refreshStatus();
   }
 
   async function inspectNodeWhenStable(node, source) {
@@ -215,6 +252,7 @@
     }
     const payload = extractCandidatePayload(node);
     if (!payload.rawVisibleText.trim()) {
+      clearWaitingDisplay();
       return;
     }
 
@@ -226,6 +264,9 @@
       }
       state.lastText = payload.rawVisibleText;
       state.retryCount = 0;
+      if (source === "latest") {
+        setWaitingDisplay("waiting for response");
+      }
       debugLog("[SK live] text stable start", {
         source,
         rawVisibleTextLength: payload.rawVisibleText.length
@@ -265,6 +306,7 @@
     const fingerprint = simpleFingerprint(text);
     if (state.processedFingerprint === fingerprint && source !== "manual_rescan") {
       nodeState.set(node, state);
+      clearWaitingDisplay();
       return;
     }
 
@@ -302,6 +344,7 @@
     if (!parsed.turn) {
       state.processedFingerprint = fingerprint;
       nodeState.set(node, state);
+      clearWaitingDisplay();
       return;
     }
 
@@ -314,7 +357,7 @@
       return;
     }
     renderStatus({
-      currentTurn: parsed.turn,
+      ...(mode === "live" ? { currentTurn: parsed.turn } : { compactState: "rescanning" }),
       recentText: `turn ${parsed.turn} observed`
     });
 
@@ -1026,6 +1069,7 @@
         <span class="sk-compact-ready">SK · turn <b data-sk-turn>-</b> → <b data-sk-next>10</b> · saved <b data-sk-saved>0</b></span>
         <span class="sk-compact-waiting">SK · waiting<span class="sk-dots" aria-hidden="true"></span></span>
         <span class="sk-compact-empty">SK · ready</span>
+        <span class="sk-compact-rescanning">SK · saved <b data-sk-rescan-saved>0</b> · rescanning</span>
       </div>
       <div class="sk-panel">
         <div class="sk-header">
@@ -1061,6 +1105,7 @@
       next: root.querySelector("[data-sk-next]"),
       nextDetail: root.querySelector("[data-sk-next-detail]"),
       saved: root.querySelector("[data-sk-saved]"),
+      rescanSaved: root.querySelector("[data-sk-rescan-saved]"),
       savedDetail: root.querySelector("[data-sk-saved-detail]"),
       missing: root.querySelector("[data-sk-missing]"),
       variant: root.querySelector("[data-sk-variant]"),
@@ -1206,6 +1251,33 @@
       return null;
     }
     return rect;
+  }
+
+  function setWaitingDisplay(recentText = "waiting for response") {
+    renderStatus({ waiting: true, recentText, mode: "pending" });
+    window.clearTimeout(waitingTimer);
+    waitingTimer = window.setTimeout(() => {
+      clearWaitingDisplay();
+    }, WAITING_DISPLAY_TTL_MS);
+  }
+
+  function clearWaitingDisplay(update = {}) {
+    window.clearTimeout(waitingTimer);
+    waitingTimer = null;
+    if (floatingBar?.root?.dataset.compactState === "waiting") {
+      refreshStatus().catch((error) => renderStatus({
+        compactState: hasDisplayedTurn() ? "ready" : "empty",
+        recentText: update.recentText || String(error?.message || error || "ready")
+      }));
+      return;
+    }
+    if (update.recentText) {
+      renderStatus(update);
+    }
+  }
+
+  function hasDisplayedTurn() {
+    return Number(floatingBar?.turn?.textContent || 0) > 0;
   }
 
   function supportsDirectorySave() {
@@ -1541,7 +1613,7 @@
       }
       const displayTurn = status.displayTurn || status.visibleTurn || status.lastSeenTurn || 0;
       renderStatus({
-        compactState: displayTurn > 0 ? "ready" : "empty",
+        compactState: manualRescanActive ? "rescanning" : displayTurn > 0 ? "ready" : "empty",
         conversation: shortConversation(status.conversationKey),
         currentTurn: displayTurn,
         nextTurn: status.nextSnapshotTurn || 10,
@@ -1570,6 +1642,10 @@
       const hasKnownTurn = Number(update.currentTurn || 0) > 0 || Number(floatingBar.turn.textContent || 0) > 0;
       floatingBar.root.dataset.compactState = update.waiting ? "waiting" : hasKnownTurn ? "ready" : "empty";
     }
+    if ((update.compactState && update.compactState !== "waiting") || update.waiting === false) {
+      window.clearTimeout(waitingTimer);
+      waitingTimer = null;
+    }
     if (update.conversation !== undefined) {
       floatingBar.conversation.textContent = update.conversation || "-";
     }
@@ -1585,6 +1661,7 @@
     if (update.saved !== undefined) {
       const savedText = String(update.saved);
       floatingBar.saved.textContent = savedText;
+      floatingBar.rescanSaved.textContent = savedText;
       floatingBar.savedDetail.textContent = savedText;
     }
     if (update.missing !== undefined) {
@@ -1765,6 +1842,8 @@
     });
     window.clearTimeout(refreshTimer);
     window.clearTimeout(anchorTimer);
+    window.clearTimeout(waitingTimer);
+    window.clearTimeout(rescanEndTimer);
     window.clearInterval(watchdogTimer);
     for (const timer of pendingTimers) {
       window.clearTimeout(timer);

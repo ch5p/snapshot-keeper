@@ -2,7 +2,7 @@
 
 Chrome MV3 extension for saving only explicitly marked ChatGPT assistant snapshot blocks.
 
-Current MVP version: `0.2.7`
+Current MVP version: `0.2.9`
 
 ## What It Saves
 
@@ -164,5 +164,8 @@ Reload the ChatGPT tab after changing the flag.
 - `options/`: extension options/privacy text.
 
 Runtime snapshot output folders such as `2026-*/` are excluded from git.
+
+
+
 
 
