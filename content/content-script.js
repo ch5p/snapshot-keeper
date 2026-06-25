@@ -1020,11 +1020,12 @@
     root.id = "snapshot-keeper-bar";
     root.dataset.expanded = "false";
     root.dataset.debug = DEBUG ? "true" : "false";
-    root.dataset.compactState = "ready";
+    root.dataset.compactState = "empty";
     root.innerHTML = `
       <div class="sk-compact" data-sk-compact title="Snapshot Keeper">
         <span class="sk-compact-ready">SK · turn <b data-sk-turn>-</b> → <b data-sk-next>10</b> · saved <b data-sk-saved>0</b></span>
         <span class="sk-compact-waiting">SK · waiting<span class="sk-dots" aria-hidden="true"></span></span>
+        <span class="sk-compact-empty">SK · ready</span>
       </div>
       <div class="sk-panel">
         <div class="sk-header">
@@ -1535,13 +1536,14 @@
       }
       const status = response.status;
       if (!status) {
-        renderStatus({ recentText: "waiting for conversation" });
+        renderStatus({ compactState: "empty", recentText: "waiting for conversation" });
         return;
       }
+      const displayTurn = status.displayTurn || status.visibleTurn || status.lastSeenTurn || 0;
       renderStatus({
-        waiting: false,
+        compactState: displayTurn > 0 ? "ready" : "empty",
         conversation: shortConversation(status.conversationKey),
-        currentTurn: status.displayTurn || status.visibleTurn || status.lastSeenTurn || 0,
+        currentTurn: displayTurn,
         nextTurn: status.nextSnapshotTurn || 10,
         saved: status.savedCount || 0,
         missing: status.missingCount || 0,
@@ -1562,14 +1564,17 @@
     if (update.mode) {
       floatingBar.root.dataset.mode = update.mode;
     }
-    if (update.waiting !== undefined) {
-      floatingBar.root.dataset.compactState = update.waiting ? "waiting" : "ready";
+    if (update.compactState !== undefined) {
+      floatingBar.root.dataset.compactState = update.compactState;
+    } else if (update.waiting !== undefined) {
+      const hasKnownTurn = Number(update.currentTurn || 0) > 0 || Number(floatingBar.turn.textContent || 0) > 0;
+      floatingBar.root.dataset.compactState = update.waiting ? "waiting" : hasKnownTurn ? "ready" : "empty";
     }
     if (update.conversation !== undefined) {
       floatingBar.conversation.textContent = update.conversation || "-";
     }
     if (update.currentTurn !== undefined) {
-      const turnText = String(update.currentTurn || "-");
+      const turnText = Number(update.currentTurn || 0) > 0 ? String(update.currentTurn) : "-";
       floatingBar.turn.textContent = turnText;
       floatingBar.turnDetail.textContent = turnText;
     }

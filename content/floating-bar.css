@@ -31,15 +31,21 @@
   white-space: nowrap;
 }
 
-#snapshot-keeper-bar .sk-compact-waiting {
+#snapshot-keeper-bar .sk-compact-waiting,
+#snapshot-keeper-bar .sk-compact-empty {
   display: none;
 }
 
-#snapshot-keeper-bar[data-compact-state="waiting"] .sk-compact-ready {
+#snapshot-keeper-bar[data-compact-state="waiting"] .sk-compact-ready,
+#snapshot-keeper-bar[data-compact-state="empty"] .sk-compact-ready {
   display: none;
 }
 
 #snapshot-keeper-bar[data-compact-state="waiting"] .sk-compact-waiting {
+  display: inline;
+}
+
+#snapshot-keeper-bar[data-compact-state="empty"] .sk-compact-empty {
   display: inline;
 }
 
