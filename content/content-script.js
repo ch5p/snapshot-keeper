@@ -80,7 +80,10 @@
     if (!document.body || extensionStale) {
       return;
     }
-    observer = new MutationObserver(() => {
+    observer = new MutationObserver((mutations) => {
+      if (!mutations.some(shouldInspectMutation)) {
+        return;
+      }
       debugLog("[SK live] observer fired", { url: location.href });
       scheduleInspection("live");
     });
@@ -89,6 +92,28 @@
       subtree: true,
       characterData: true
     });
+  }
+
+  function shouldInspectMutation(mutation) {
+    if (!mutation) {
+      return false;
+    }
+    if (isExtensionUiNode(mutation.target)) {
+      return false;
+    }
+    const addedNodes = [...mutation.addedNodes || []];
+    if (addedNodes.length > 0) {
+      return addedNodes.some((node) => !isExtensionUiNode(node));
+    }
+    return true;
+  }
+
+  function isExtensionUiNode(node) {
+    if (!node) {
+      return false;
+    }
+    const element = node.nodeType === Node.ELEMENT_NODE ? node : node.parentElement || node.parentNode;
+    return Boolean(element?.closest?.("#snapshot-keeper-bar, .snapshot-keeper-notice"));
   }
 
   function startWatchdog() {
@@ -144,6 +169,9 @@
   function scheduleInspection(source = "live") {
     if (extensionStale) {
       return;
+    }
+    if (source === "live") {
+      renderStatus({ waiting: true, recentText: "waiting for response", mode: "pending" });
     }
     window.clearTimeout(refreshTimer);
     refreshTimer = window.setTimeout(() => {
@@ -992,9 +1020,11 @@
     root.id = "snapshot-keeper-bar";
     root.dataset.expanded = "false";
     root.dataset.debug = DEBUG ? "true" : "false";
+    root.dataset.compactState = "ready";
     root.innerHTML = `
       <div class="sk-compact" data-sk-compact title="Snapshot Keeper">
-        SK · turn <b data-sk-turn>-</b> → <b data-sk-next>10</b> · saved <b data-sk-saved>0</b>
+        <span class="sk-compact-ready">SK · turn <b data-sk-turn>-</b> → <b data-sk-next>10</b> · saved <b data-sk-saved>0</b></span>
+        <span class="sk-compact-waiting">SK · waiting<span class="sk-dots" aria-hidden="true"></span></span>
       </div>
       <div class="sk-panel">
         <div class="sk-header">
@@ -1461,28 +1491,28 @@
       }
       let shouldRefresh = true;
       if (message.type === "SAVE_PENDING") {
-        renderStatus({ recentText: `turn ${message.turn} saving...`, mode: "pending" });
+        renderStatus({ waiting: false, recentText: `turn ${message.turn} saving...`, mode: "pending" });
       } else if (message.type === "SAVE_CONFIRMED") {
-        renderStatus({ recentText: `turn ${message.turn} saved`, mode: "confirmed" });
+        renderStatus({ waiting: false, recentText: `turn ${message.turn} saved`, mode: "confirmed" });
         showNotice("Saved", `turn ${message.turn} snapshot saved`, "success", true, `saved:${message.conversationKey}:${message.turn}:${message.filePath}`);
       } else if (message.type === "MISSING_PENDING") {
-        renderStatus({ recentText: `turn ${message.turn} missing record saving...`, mode: "pending" });
+        renderStatus({ waiting: false, recentText: `turn ${message.turn} missing record saving...`, mode: "pending" });
       } else if (message.type === "INVALID_SNAPSHOT") {
-        renderStatus({ recentText: `turn ${message.turn} invalid snapshot`, mode: "error" });
+        renderStatus({ waiting: false, recentText: `turn ${message.turn} invalid snapshot`, mode: "error" });
         showNotice("Invalid snapshot", message.reason || "invalid marker", "error", false, message.toastKey || `invalid:${message.conversationKey}:${message.turn}:${message.reason}`);
       } else if (message.type === "SAVE_ERROR") {
         const label = /^download_(path|filename)/.test(message.reason || "") ? "download path error" : "save error";
-        renderStatus({ recentText: `turn ${message.turn || "-"} ${label}`, mode: "error" });
+        renderStatus({ waiting: false, recentText: `turn ${message.turn || "-"} ${label}`, mode: "error" });
         showNotice("Save error", message.reason || "download failed", "error", false, `error:${message.conversationKey}:${message.turn}:${message.reason}`);
       } else if (message.type === "QA_DOWNLOAD_STARTED") {
-        renderStatus({ recentText: `QA save id ${message.downloadId}`, mode: "pending" });
+        renderStatus({ waiting: false, recentText: `QA save id ${message.downloadId}`, mode: "pending" });
         shouldRefresh = false;
       } else if (message.type === "QA_DOWNLOAD_COMPLETE") {
         const label = message.filenameMatches === false ? "QA complete: filename mismatch" : "QA save complete";
-        renderStatus({ recentText: `${label} ${message.writeId || message.downloadId || ""}`.trim(), mode: message.filenameMatches === false ? "error" : "confirmed" });
+        renderStatus({ waiting: false, recentText: `${label} ${message.writeId || message.downloadId || ""}`.trim(), mode: message.filenameMatches === false ? "error" : "confirmed" });
         shouldRefresh = false;
       } else if (message.type === "QA_DOWNLOAD_ERROR") {
-        renderStatus({ recentText: `QA save error: ${message.reason || "failed"}`, mode: "error" });
+        renderStatus({ waiting: false, recentText: `QA save error: ${message.reason || "failed"}`, mode: "error" });
         shouldRefresh = false;
       }
       if (shouldRefresh) {
@@ -1509,6 +1539,7 @@
         return;
       }
       renderStatus({
+        waiting: false,
         conversation: shortConversation(status.conversationKey),
         currentTurn: status.displayTurn || status.visibleTurn || status.lastSeenTurn || 0,
         nextTurn: status.nextSnapshotTurn || 10,
@@ -1530,6 +1561,9 @@
     }
     if (update.mode) {
       floatingBar.root.dataset.mode = update.mode;
+    }
+    if (update.waiting !== undefined) {
+      floatingBar.root.dataset.compactState = update.waiting ? "waiting" : "ready";
     }
     if (update.conversation !== undefined) {
       floatingBar.conversation.textContent = update.conversation || "-";
