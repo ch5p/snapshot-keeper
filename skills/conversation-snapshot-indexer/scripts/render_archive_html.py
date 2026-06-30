@@ -528,7 +528,7 @@ h1.page{font-size:26px; margin:6px 0 4px}
 .card .foot a{font-size:12.5px; font-weight:600}
 .copy-delete{
   border:0; background:transparent; color:#e0683b; font-size:12.5px; font-weight:700;
-  padding:0; cursor:pointer;
+  padding:0; cursor:pointer; margin-left:auto;
 }
 .copy-delete:hover{text-decoration:underline}
 .empty{color:var(--muted); text-align:center; padding:60px 0}
@@ -625,7 +625,7 @@ def render_index(notes: List[Note], pending_project_jobs: int) -> str:
   <p class="summary">{html.escape(note.summary or '선요약 없음 · 원문 확인 필요')}</p>
   <div class="chips">{chips}</div>
   <div class="statuses">{statuses}</div>
-  <div class="foot"><a href="archive_html/{html.escape(note.html_filename, quote=True)}">열기 →</a>{conv}<button class="copy-delete" type="button" data-delete-cmd="{html.escape(delete_cmd, quote=True)}">삭제 명령 복사</button></div>
+  <div class="foot"><a href="archive_html/{html.escape(note.html_filename, quote=True)}">열기 →</a>{conv}<button class="copy-delete" type="button" data-delete-cmd="{html.escape(delete_cmd, quote=True)}">삭제</button></div>
 </article>'''
         )
 
@@ -666,7 +666,7 @@ document.addEventListener('click',async(e)=>{{
   catch(_){{
     const ta=document.createElement('textarea');ta.value=cmd;document.body.appendChild(ta);ta.select();document.execCommand('copy');ta.remove();b.textContent='복사됨';
   }}
-  setTimeout(()=>b.textContent='삭제 명령 복사',1400);
+  setTimeout(()=>b.textContent='삭제',1400);
 }});
 </script>"""
     return page_shell("ChatGPT Snapshot Archive", topbar, body)
