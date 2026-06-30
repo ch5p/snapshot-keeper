@@ -407,6 +407,14 @@ def render_markdown(md: str) -> str:
             out.append(tbl)
             continue
 
+        # Fallback for pipe-prefixed lines that are not valid Markdown table
+        # headers. Without consuming the line, the paragraph parser below would
+        # see a block-start character and loop forever.
+        if stripped.startswith("|"):
+            out.append(f"<p>{render_inline(stripped)}</p>")
+            i += 1
+            continue
+
         # unordered list block
         if re.match(r"^[-*]\s+", stripped):
             items: List[str] = []

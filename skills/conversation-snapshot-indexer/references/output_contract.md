@@ -51,14 +51,18 @@ Ignore these by default unless the user explicitly asks to audit generated archi
 
 When a batch contains multiple `conversationKey` values, create one archive note per `conversationKey` unless the user explicitly asks for a combined batch. If `conversationKey` is missing, group by the nearest `snapshots/YYYY-MM/<conversation-folder>/` path.
 
+Project-root pending jobs are part of the source contract. Before reporting completion, scan `D:\_my_tools\ChatGPT_Snapshot\YYYY-MM\*/` for pending conversation folders. If any exist, process them before reporting success.
+
 ## Report contract
 
 Every skill run report must include:
 
 - source snapshot scan count
+- project-root pending job count
 - new/changed/uncovered documentization target count
 - archive notes created/updated/unchanged
 - HTML regeneration result
+- verification result with `project_jobs=0`
 - explicit no-op message when there is no new archive documentization target
 - final link to the archive folder `D:\_my_tools\ChatGPT_Snapshot_Archive`, not directly to `index.html`
 

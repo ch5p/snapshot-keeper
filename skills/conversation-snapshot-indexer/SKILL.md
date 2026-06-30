@@ -75,14 +75,18 @@ Human-facing outputs:
 When the user simply says "use the skill", "스킬 사용", "취합해", or similar without extra instructions:
 
 1. Use `D:\_my_tools\ChatGPT_Snapshot_Archive` as the archive root.
-2. Scan `snapshots/` for source snapshot markdown files.
+2. Scan both source locations:
+   - project-root pending jobs: `D:\_my_tools\ChatGPT_Snapshot\YYYY-MM\<conversation-folder>\**\*.md`
+   - archived evidence: `D:\_my_tools\ChatGPT_Snapshot_Archive\snapshots\YYYY-MM\<conversation-folder>\*.md`
 3. Read the current `index/_index__snapshot_archive.md` and existing files under `archive/`.
 4. Treat snapshots already represented by an archive note/index row as already collected.
-5. Collect snapshots that are new, not covered by an index row, or newer than the relevant archive note.
+5. Collect snapshots that are new, not covered by an index row, newer than the relevant archive note, or still sitting in the project-root pending job folder.
 6. If new snapshots extend an existing conversation archive, update that archive note and its index row instead of creating a duplicate note.
 7. If a new `conversationKey` appears, create one new archive note for that conversation and add one index row.
-8. Write temporary packets only under `work/`, preferably `work/snapshot_packet` or `work/extension_repo_qa`.
-9. Update the root `README.md` only when navigation, stored archive items, or visible folder roles change.
+8. Copy project-root pending job snapshots into archive `snapshots/` using the short `turnNNN_status.md` style, then move processed project-root month folders under `work/processed_project_snapshots/`.
+9. Write temporary packets only under `work/`, preferably `work/snapshot_packet` or `work/extension_repo_qa`.
+10. Update the root `README.md` only when navigation, stored archive items, or visible folder roles change.
+11. Run verification and do not report completion unless `project_jobs` is `0`, every archive note has index/HTML coverage, and every archived source snapshot has `snapshot_html` coverage.
 
 Do not require the user to repeat the archive root or folder policy unless the local files contradict these rules.
 
@@ -91,9 +95,11 @@ Do not require the user to repeat the archive root or folder policy unless the l
 Keep user-facing reports short, but always include the source-to-archive decision:
 
 - `원본 스캔`: how many `snapshots/**/*.md` files were found.
-- `문서화 대상`: how many source snapshots or conversation groups were new, changed, or uncovered.
+- `대기 원본`: how many project-root pending conversation folders and files were found.
+- `문서화 대상`: how many source snapshots or conversation groups were new, changed, uncovered, or still pending in the project root.
 - `archive 반영`: archive notes created, updated, or unchanged.
 - `HTML 반영`: whether `index.html`, `archive_html`, and `snapshot_html` were regenerated.
+- `완료 검증`: include `project_jobs=0`, archive note count, archive HTML count, source snapshot count, and snapshot HTML count.
 - If `문서화 대상` is 0, say explicitly: `새로 archive 문서화할 원본은 없었습니다.`
 - End the final report with a link to the archive folder `D:\_my_tools\ChatGPT_Snapshot_Archive`, not directly to `index.html`, so the user can open it in Explorer and choose the file.
 
@@ -107,6 +113,14 @@ The browsing layer (`index.html`, `archive_html/*.html`) and the README "현재 
 ```bash
 python scripts/render_archive_html.py --archive-root "D:\_my_tools\ChatGPT_Snapshot_Archive"
 ```
+
+- Then run:
+
+```bash
+python scripts/verify_archive_sync.py --archive-root "D:\_my_tools\ChatGPT_Snapshot_Archive" --project-root "D:\_my_tools\ChatGPT_Snapshot"
+```
+
+- If verification reports `project_jobs` greater than `0`, the skill is not complete. Process those pending source folders first.
 
 - This reads `archive/*.md` and regenerates, deterministically:
   - `index.html` (search + cards, OpenAI-style dark theme)
