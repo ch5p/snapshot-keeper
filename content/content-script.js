@@ -60,6 +60,7 @@
   let nodeSequence = 0;
   let floatingBar;
   let observer;
+  let mountGuardObserver;
   let refreshTimer;
   let loadedScanTimer;
   let loadedScanRunning = false;
@@ -94,6 +95,7 @@
     floatingBar = createFloatingBar();
     window.__snapshotKeeperCleanup = cleanupCurrentInstance;
     mountFloatingBar();
+    startMountGuard();
     bindFloatingBarActions(floatingBar);
     if (UI_ANCHOR_ENABLED) {
       bindFloatingBarAnchor();
@@ -141,6 +143,8 @@
     pendingTimers.clear();
     observer?.disconnect();
     observer = null;
+    mountGuardObserver?.disconnect();
+    mountGuardObserver = null;
     floatingBar?.root?.remove();
     floatingBar = null;
   }
@@ -280,6 +284,24 @@
     if (!document.body.contains(floatingBar.root)) {
       document.body.appendChild(floatingBar.root);
     }
+  }
+
+  function startMountGuard() {
+    if (!document.documentElement || extensionStale || mountGuardObserver) {
+      return;
+    }
+    mountGuardObserver = new MutationObserver(() => {
+      if (extensionStale) {
+        mountGuardObserver?.disconnect();
+        mountGuardObserver = null;
+        return;
+      }
+      if (floatingBar?.root && document.body && !document.body.contains(floatingBar.root)) {
+        mountFloatingBar();
+      }
+    });
+    // ChatGPT may replace early body children during hydration; keep the bar mounted without reviving the full UI watchdog.
+    mountGuardObserver.observe(document.documentElement, { childList: true, subtree: true });
   }
 
   async function initializeContext() {
