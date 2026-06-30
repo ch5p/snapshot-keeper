@@ -72,7 +72,7 @@ def is_source_snapshot_file(path: Path) -> bool:
     if name in {"readme.md", "_index__snapshot_archive.md"}:
         return False
     parts = {part.lower() for part in path.parts}
-    if "archive" in parts or "index" in parts or "work" in parts:
+    if "archive" in parts or "index" in parts or "work" in parts or "maintenance" in parts or "tmp" in parts:
         return False
     if SOURCE_FILENAME_RE.match(path.name):
         return True

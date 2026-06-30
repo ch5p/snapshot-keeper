@@ -17,7 +17,7 @@ README.md
 snapshots\
 archive\
 index\
-work\
+tmp\
 ```
 
 Rules:
@@ -30,10 +30,10 @@ Rules:
 - Handoff/archive notes go directly under `archive/`.
 - The global index stays at `index/_index__snapshot_archive.md`.
 - Root README archive entries must link to the corresponding `archive/*.md` note.
-- Temporary evidence packets go under `work/`.
+- Disposable helper outputs, evidence packets, processed-source backups, trash, and QA/review outputs go under `tmp/`.
 - Do not create root-level `YYYY-MM` folders.
 - Do not create `_README__archive.md` by default.
-- `work/` may be absent until needed, but the root README should still define its role when present.
+- `tmp/` may be absent until needed, but the root README should still define its role when present.
 
 ## Source input rules
 
@@ -47,11 +47,11 @@ Ignore these by default unless the user explicitly asks to audit generated archi
 - `README.md`
 - `archive/*.md`
 - `index/*.md`
-- `work/*.md`
+- `tmp/*.md`
 
 When a batch contains multiple `conversationKey` values, create one archive note per `conversationKey` unless the user explicitly asks for a combined batch. If `conversationKey` is missing, group by the nearest `snapshots/YYYY-MM/<conversation-folder>/` path.
 
-Project-root pending jobs are part of the source contract. Before reporting completion, scan `D:\_my_tools\ChatGPT_Snapshot\YYYY-MM\*/` for pending conversation folders. If any exist, process them before reporting success.
+Project-root pending jobs are part of the source contract. Before reporting completion, scan `D:\_my_tools\ChatGPT_Snapshot\YYYY-MM\*/` for pending conversation folders. If any exist, process them before reporting success, then move processed source folders under `tmp/processed_project_snapshots/`.
 
 ## Report contract
 

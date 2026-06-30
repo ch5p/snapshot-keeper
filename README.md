@@ -78,7 +78,7 @@ D:\_my_tools\ChatGPT_Snapshot_Archive\
 ├── snapshots\
 ├── archive\
 ├── index\
-├── work\
+├── tmp\
 └── skills\
 ```
 
@@ -87,12 +87,12 @@ Folder roles:
 - `snapshots/`: source snapshot evidence written or collected from the extension.
 - `archive/`: flat human-facing handoff/archive notes.
 - `index/`: global search indexes such as `_index__snapshot_archive.md`.
-- `work/`: temporary evidence packets and review preparation files. Repo-side QA/review outputs that would otherwise create `_qa` under this extension root belong in `D:\_my_tools\ChatGPT_Snapshot_Archive\work\extension_repo_qa`.
+- `tmp/`: disposable helper outputs such as evidence packets, review packages, processed-source backups, and trash. Repo-side QA/review outputs that would otherwise create `_qa` under this extension root belong in `D:\_my_tools\ChatGPT_Snapshot_Archive\tmp\extension_repo_qa`.
 - `skills/`: source copy or backup of the archive/indexing skill, such as `conversation-snapshot-indexer`.
 
 When preparing the next external AI review, include or mention the external archive workflow and the skill source copy under `ChatGPT_Snapshot_Archive\skills`. The reviewer should understand that source snapshots may live outside this code repository and that archive/handoff generation is intentionally handled by a separate skill/session.
 
-Do not keep `_qa`, `__pycache__`, or other generated QA/cache folders inside the extension load root. Chrome's unpacked-extension loader rejects filenames and folders that start with `_`, even when Git ignores them. Keep those artifacts under the external archive `work/` folder instead.
+Do not keep `_qa`, `__pycache__`, or other generated QA/cache folders inside the extension load root. Chrome's unpacked-extension loader rejects filenames and folders that start with `_`, even when Git ignores them. Keep those artifacts under the external archive `tmp/` folder instead.
 
 ## Floating Bar
 

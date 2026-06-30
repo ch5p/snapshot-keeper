@@ -24,7 +24,7 @@ ChatGPT_Snapshot_Archive\
 ├── snapshots\
 ├── archive\
 ├── index\
-└── work\
+└── tmp\
 ```
 
 Root rules:
@@ -36,9 +36,9 @@ Root rules:
 - `snapshots/` may be deep and machine-friendly because it stores source evidence.
 - `archive/` must stay flat because it is the human-facing handoff folder.
 - `index/` stores global search indexes only.
-- `work/` stores temporary evidence packets, generated working files, and repo-side QA/review outputs.
+- `tmp/` stores disposable helper outputs such as evidence packets, processed-source backups, QA/review packages, and trash.
 - Never create `_qa`, `__pycache__`, review zip files, or temporary evidence folders under `D:\_my_tools\ChatGPT_Snapshot`; Chrome Load unpacked may reject `_`-prefixed folders in the extension root.
-- Put repo-side QA/review outputs under `D:\_my_tools\ChatGPT_Snapshot_Archive\work\extension_repo_qa` unless the user provides another external work folder.
+- Put repo-side QA/review outputs under `D:\_my_tools\ChatGPT_Snapshot_Archive\tmp\extension_repo_qa` unless the user provides another external temp folder.
 
 Snapshot source layout:
 
@@ -83,8 +83,8 @@ When the user simply says "use the skill", "스킬 사용", "취합해", or simi
 5. Collect snapshots that are new, not covered by an index row, newer than the relevant archive note, or still sitting in the project-root pending job folder.
 6. If new snapshots extend an existing conversation archive, update that archive note and its index row instead of creating a duplicate note.
 7. If a new `conversationKey` appears, create one new archive note for that conversation and add one index row.
-8. Copy project-root pending job snapshots into archive `snapshots/` using the short `turnNNN_status.md` style, then move processed project-root month folders under `work/processed_project_snapshots/`.
-9. Write temporary packets only under `work/`, preferably `work/snapshot_packet` or `work/extension_repo_qa`.
+8. Copy project-root pending job snapshots into archive `snapshots/` using the short `turnNNN_status.md` style, then move processed project-root month folders under `tmp/processed_project_snapshots/`.
+9. Write temporary packets only under `tmp/`, preferably `tmp/snapshot_packet` or `tmp/extension_repo_qa`.
 10. Update the root `README.md` only when navigation, stored archive items, or visible folder roles change.
 11. Run verification and do not report completion unless `project_jobs` is `0`, every archive note has index/HTML coverage, and every archived source snapshot has `snapshot_html` coverage.
 
@@ -126,6 +126,7 @@ python scripts/verify_archive_sync.py --archive-root "D:\_my_tools\ChatGPT_Snaps
   - `index.html` (search + cards, OpenAI-style dark theme)
   - `archive_html/<same-name>.html` (one page per note, with a back-to-index link and a direct "원본 ChatGPT 대화 열기" button)
   - the `## 현재 보관 항목` section of `README.md`
+- `index.html` includes a per-card delete-command copy button. The copied command runs `delete_archive_item.py`, which moves the note, generated HTML, referenced source snapshots, and snapshot HTML into `tmp/trash`, updates the index, rerenders HTML, and verifies sync.
 - The script is pure standard library (no pip installs) and safe to re-run; it only rewrites generated files and that one README section.
 - Markdown stays the single source of truth. Fix content in `archive/*.md`, then re-run the script. Never patch the HTML to fix content.
 
@@ -164,7 +165,7 @@ Interpret labels together with their section names:
 2. If files are available in the local runtime, run:
 
 ```bash
-python scripts/snapshot_packet.py --out "D:\_my_tools\ChatGPT_Snapshot_Archive\work\snapshot_packet" <snapshot-files-or-directory>
+python scripts/snapshot_packet.py --out "D:\_my_tools\ChatGPT_Snapshot_Archive\tmp\snapshot_packet" <snapshot-files-or-directory>
 ```
 
 3. Read the generated `evidence_packet.md` before writing the archive note.

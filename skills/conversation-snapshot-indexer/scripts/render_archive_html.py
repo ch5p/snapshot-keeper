@@ -526,6 +526,11 @@ h1.page{font-size:26px; margin:6px 0 4px}
 .st.invalid{color:var(--invalid); border-color:#4a2a6e; background:#1f1430}
 .card .foot{margin-top:auto; display:flex; gap:10px; align-items:center; padding-top:6px}
 .card .foot a{font-size:12.5px; font-weight:600}
+.copy-delete{
+  border:0; background:transparent; color:#e0683b; font-size:12.5px; font-weight:700;
+  padding:0; cursor:pointer;
+}
+.copy-delete:hover{text-decoration:underline}
 .empty{color:var(--muted); text-align:center; padding:60px 0}
 /* detail page */
 .note{
@@ -604,6 +609,12 @@ def render_index(notes: List[Note], pending_project_jobs: int) -> str:
             f"&#8599; 원본 대화</a>"
             if note.chatgpt_url else ""
         )
+        delete_cmd = (
+            'python "D:\\_my_tools\\ChatGPT_Snapshot\\skills\\conversation-snapshot-indexer\\scripts\\delete_archive_item.py" '
+            '--archive-root "D:\\_my_tools\\ChatGPT_Snapshot_Archive" '
+            '--project-root "D:\\_my_tools\\ChatGPT_Snapshot" '
+            f'--note "{note.md_filename}" --confirm'
+        )
         search_blob = html.escape(
             " ".join([note.title, note.summary, " ".join(note.keywords), note.date, note.turn_range])
         ).lower()
@@ -614,7 +625,7 @@ def render_index(notes: List[Note], pending_project_jobs: int) -> str:
   <p class="summary">{html.escape(note.summary or '선요약 없음 · 원문 확인 필요')}</p>
   <div class="chips">{chips}</div>
   <div class="statuses">{statuses}</div>
-  <div class="foot"><a href="archive_html/{html.escape(note.html_filename, quote=True)}">열기 →</a>{conv}</div>
+  <div class="foot"><a href="archive_html/{html.escape(note.html_filename, quote=True)}">열기 →</a>{conv}<button class="copy-delete" type="button" data-delete-cmd="{html.escape(delete_cmd, quote=True)}">삭제 명령 복사</button></div>
 </article>'''
         )
 
@@ -646,6 +657,16 @@ q.addEventListener('input',()=>{{
   const t=q.value.trim().toLowerCase();let shown=0;
   cards.forEach(c=>{{const hit=!t||c.dataset.search.includes(t);c.style.display=hit?'':'none';if(hit)shown++;}});
   empty.style.display=shown?'none':'block';
+}});
+document.addEventListener('click',async(e)=>{{
+  const b=e.target.closest('[data-delete-cmd]');
+  if(!b)return;
+  const cmd=b.dataset.deleteCmd;
+  try{{await navigator.clipboard.writeText(cmd);b.textContent='복사됨';}}
+  catch(_){{
+    const ta=document.createElement('textarea');ta.value=cmd;document.body.appendChild(ta);ta.select();document.execCommand('copy');ta.remove();b.textContent='복사됨';
+  }}
+  setTimeout(()=>b.textContent='삭제 명령 복사',1400);
 }});
 </script>"""
     return page_shell("ChatGPT Snapshot Archive", topbar, body)

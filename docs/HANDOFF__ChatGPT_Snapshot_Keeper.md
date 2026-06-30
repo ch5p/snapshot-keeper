@@ -74,7 +74,7 @@ D:\_my_tools\ChatGPT_Snapshot_Archive\
 ├── snapshots\
 ├── archive\
 ├── index\
-├── work\
+├── tmp\
 └── skills\
 ```
 
@@ -84,8 +84,8 @@ Rules:
 - Root `README.md` is the browsing entry point and should be updated, not recreated under another name.
 - `archive/` stays flat. Handoff/archive notes go directly inside it.
 - `index/_index__snapshot_archive.md` is the global search index.
-- `work/` is for temporary evidence packets and repo-side QA/review outputs.
-- Current moved QA/review output location: `D:\_my_tools\ChatGPT_Snapshot_Archive\work\extension_repo_qa`.
+- `tmp/` is for disposable helper outputs such as evidence packets, repo-side QA/review outputs, processed-source backups, and trash.
+- Current moved QA/review output location: `D:\_my_tools\ChatGPT_Snapshot_Archive\tmp\extension_repo_qa`.
 - `skills/` is for skill backup or unpacked skill copies.
 - Source snapshots may be deeper and machine-friendly.
 - For next external AI review, include or mention the source copy of the archive/indexing skill under `D:\_my_tools\ChatGPT_Snapshot_Archive\skills` when present.
@@ -160,7 +160,7 @@ Option B: update extension path schema.
 - Do not force-scroll old conversation history.
 - Do not move or delete existing runtime snapshots unless explicitly requested.
 - Do not keep `_qa`, `__pycache__`, or generated review packages under `D:\_my_tools\ChatGPT_Snapshot`; Chrome's unpacked-extension loader rejects `_`-prefixed folders even if Git ignores them.
-- Put future repo-side QA/review packages under `D:\_my_tools\ChatGPT_Snapshot_Archive\work\extension_repo_qa` or another external archive `work/` subfolder.
+- Put future repo-side QA/review packages under `D:\_my_tools\ChatGPT_Snapshot_Archive\tmp\extension_repo_qa` or another external archive `tmp/` subfolder.
 - Before changing path schema, compare:
   - README/documented path
   - actual sample output
