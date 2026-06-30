@@ -64,26 +64,6 @@
   display: inline-block;
   min-width: 18px;
   content: "";
-  animation: sk-dots 1.1s steps(4, end) infinite;
-}
-
-@keyframes sk-dots {
-  0% {
-    content: "";
-  }
-
-  25% {
-    content: ".";
-  }
-
-  50% {
-    content: "..";
-  }
-
-  75%,
-  100% {
-    content: "...";
-  }
 }
 
 #snapshot-keeper-bar::before {

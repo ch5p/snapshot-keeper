@@ -1,6 +1,8 @@
 2026-*/
 ChatGPT-Snapshots/
 _qa/
+__pycache__/
+*.pyc
 *.log
 Thumbs.db
 .DS_Store

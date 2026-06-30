@@ -12,7 +12,7 @@
       <section>
         <h2>저장 범위</h2>
         <p>저장하는 것: assistant 답변 안의 SNAPSHOT_START turn=n / SNAPSHOT_END 사이 텍스트.</p>
-        <p>저장하지 않는 것: 사용자 질문 전체, 일반 답변 전체, 입력창 내용.</p>
+        <p>저장하지 않는 것: 사용자 질문 전체, 입력창 내용. 일반 답변 전체는 명시적으로 Escape save를 누른 경우에만 별도 escape 기록으로 저장합니다.</p>
       </section>
       <section>
         <h2>저장 위치</h2>
@@ -35,7 +35,7 @@ SNAPSHOT_START turn=n
 ### 현재 진행 중인 주제
 ### 새로 확정된 사항
 ### 미확정 사항
-### 제외된 주제 (1회 기록)
+### 제외된 주제
 ### 앞으로 할 일
 SNAPSHOT_END
 

@@ -3,9 +3,15 @@
     "### 현재 진행 중인 주제",
     "### 새로 확정된 사항",
     "### 미확정 사항",
-    "### 제외된 주제 (1회 기록)",
+    "### 제외된 주제",
     "### 앞으로 할 일"
   ];
+  const SNAPSHOT_SECTION_ALIASES = {
+    "### 제외된 주제": [
+      "제외된 주제 (1회 기록)",
+      "제외된 주제"
+    ]
+  };
   const STABILITY_MS = 2600;
   const PROCESSED_EVENT_TTL_MS = 10 * 60 * 1000;
   const PROCESSED_EVENT_LIMIT = 300;
@@ -13,10 +19,20 @@
   const DISMISSED_TOAST_LIMIT = 300;
   const PARSE_RETRY_DELAY_MS = 1500;
   const PARSE_RETRY_LIMIT = 80;
+  const LOADED_SCAN_DEBOUNCE_MS = 1200;
+  const LOADED_SCAN_MAX_NODES = 120;
+  const ESCAPE_TEXT_MAX_CHARS = 120000;
+  const LIVE_ROUTE_SETTLE_MS = 1800;
+  const LIVE_CANDIDATE_VIEWPORT_MARGIN = 1.5;
   const WAITING_DISPLAY_TTL_MS = 9000;
+  const AUTO_CAPTURE_ENABLED = true;
+  const UI_WATCHDOG_ENABLED = false;
+  const UI_ANCHOR_ENABLED = false;
   const SETTINGS_DB_NAME = "snapshot-keeper-settings-db";
   const SETTINGS_STORE = "settings";
   const SAVE_DIRECTORY_HANDLE_KEY = "snapshot-save-directory-handle";
+  const AUTO_LIVE_ENABLED_KEY = "snapshot-auto-live-enabled";
+  const EXTENSION_VERSION = chrome.runtime.getManifest?.().version || "dev";
   const TURN_MARKDOWN_RE = /(?:^|\n)\s*##\s*turn\s*=\s*(\d+)\b/i;
   const TURN_RENDERED_RE = /(?:^|\n)\s*turn\s*=\s*(\d+)\b/i;
   const KOREA_TIME_RE = /대한민국 기준 시각:\s*\d{4}\.\d{2}\.\d{2}\([^)]+\)\s*\d{2}:\d{2}\s*$/u;
@@ -45,14 +61,22 @@
   let floatingBar;
   let observer;
   let refreshTimer;
+  let loadedScanTimer;
+  let loadedScanRunning = false;
   let watchdogTimer;
   let anchorTimer;
   let waitingTimer;
   let rescanEndTimer;
   let manualRescanActive = false;
+  let quietRescanActive = false;
+  let quietRescanStats = null;
   let extensionStale = false;
   let saveDirectoryHandle = null;
   let saveDirectoryName = "";
+  let currentContextKey = null;
+  let currentContextEpoch = null;
+  let liveInspectionPausedUntil = 0;
+  let autoLiveEnabled = true;
 
   bootstrap();
 
@@ -66,30 +90,103 @@
   }
 
   function init() {
+    cleanupExistingInstance();
     floatingBar = createFloatingBar();
+    window.__snapshotKeeperCleanup = cleanupCurrentInstance;
     mountFloatingBar();
     bindFloatingBarActions(floatingBar);
-    bindFloatingBarAnchor();
-    updateFloatingBarAnchor();
+    if (UI_ANCHOR_ENABLED) {
+      bindFloatingBarAnchor();
+      updateFloatingBarAnchor();
+    }
     initializeContext();
     observeStorageChanges();
     observeMessages();
-    startObserver();
-    startWatchdog();
+    if (UI_WATCHDOG_ENABLED) {
+      startWatchdog();
+    }
     restoreSnapshotDirectoryHandle().catch((error) => debugLog("[SK fs] restore failed", { error: String(error?.message || error) }));
-    scheduleInspection("boot");
+    restoreAutoLiveEnabled()
+      .catch((error) => debugLog("[SK auto] restore failed", { error: String(error?.message || error) }))
+      .finally(() => {
+        renderAutoStatus();
+        startLiveAutoCapture("boot");
+      });
+  }
+
+  function cleanupExistingInstance() {
+    const previousCleanup = window.__snapshotKeeperCleanup;
+    if (typeof previousCleanup === "function") {
+      try {
+        previousCleanup("new_instance");
+      } catch (error) {
+        debugLog("[SK cleanup] previous cleanup failed", { error: String(error?.message || error) });
+      }
+    }
+    document.querySelectorAll("#snapshot-keeper-bar, .snapshot-keeper-notice").forEach((node) => node.remove());
+  }
+
+  function cleanupCurrentInstance(reason = "cleanup") {
+    extensionStale = true;
+    debugLog("[SK cleanup]", { reason });
+    window.clearTimeout(refreshTimer);
+    window.clearTimeout(loadedScanTimer);
+    window.clearTimeout(anchorTimer);
+    window.clearTimeout(waitingTimer);
+    window.clearTimeout(rescanEndTimer);
+    window.clearInterval(watchdogTimer);
+    for (const timer of pendingTimers) {
+      window.clearTimeout(timer);
+    }
+    pendingTimers.clear();
+    observer?.disconnect();
+    observer = null;
+    floatingBar?.root?.remove();
+    floatingBar = null;
+  }
+
+  function isLiveAutoEnabled() {
+    return Boolean(AUTO_CAPTURE_ENABLED && autoLiveEnabled);
+  }
+
+  function isAutomaticInspectionSource(source) {
+    return source === "live" || source === "route_settle" || source === "boot";
+  }
+
+  function startLiveAutoCapture(source = "live") {
+    if (!isLiveAutoEnabled() || extensionStale) {
+      return;
+    }
+    startObserver();
+    scheduleInspection(source === "boot" ? "boot" : "live");
+    scheduleLoadedSnapshotScan(source === "boot" ? "boot_loaded_scan" : "auto_loaded_scan", source === "boot" ? 1800 : LOADED_SCAN_DEBOUNCE_MS);
+  }
+
+  function stopLiveAutoCapture() {
+    observer?.disconnect();
+    observer = null;
+    window.clearTimeout(refreshTimer);
+    refreshTimer = null;
+    window.clearTimeout(loadedScanTimer);
+    loadedScanTimer = null;
+    loadedScanRunning = false;
+    liveInspectionPausedUntil = 0;
   }
 
   function startObserver() {
-    if (!document.body || extensionStale) {
+    if (!document.body || extensionStale || !isLiveAutoEnabled() || observer) {
       return;
     }
     observer = new MutationObserver((mutations) => {
+      if (!isLiveAutoEnabled()) {
+        return;
+      }
       if (!mutations.some(shouldInspectMutation)) {
         return;
       }
       debugLog("[SK live] observer fired", { url: location.href });
       scheduleInspection("live");
+      scheduleLoadedSnapshotScan("auto_loaded_scan");
     });
     observer.observe(document.body, {
       childList: true,
@@ -156,7 +253,7 @@
       }
       mountFloatingBar();
       scheduleFloatingBarAnchorUpdate();
-      if (!observer) {
+      if (isLiveAutoEnabled() && !observer) {
         startObserver();
       }
     }, BAR_WATCHDOG_MS);
@@ -187,7 +284,8 @@
 
   async function initializeContext() {
     try {
-      await sendMessage("GET_CONTEXT", { url: location.href });
+      const response = await sendMessage("GET_CONTEXT", { url: location.href });
+      updateLocalContext(response.context, "initialize");
     } catch (error) {
       renderStatus({ recentText: String(error?.message || error), mode: "error" });
     }
@@ -197,30 +295,46 @@
     refreshStatus();
   }
 
-  function scheduleInspection(source = "live") {
+  function scheduleInspection(source = "live", delay = 250) {
     if (extensionStale) {
+      return;
+    }
+    if (isAutomaticInspectionSource(source) && !isLiveAutoEnabled()) {
       return;
     }
     window.clearTimeout(refreshTimer);
     refreshTimer = window.setTimeout(() => {
       inspectLatestAssistantMessage(source).catch(handleAsyncError);
-    }, 250);
+    }, delay);
   }
 
   async function inspectLatestAssistantMessage(source = "live") {
     if (extensionStale) {
       return;
     }
-    const nodes = getAssistantMessageCandidates();
-    if (source === "boot" || source === "manual_rescan") {
-      debugLog("[SK scan] visible assistant count", { count: nodes.filter(isVisible).length, source });
-    }
-    const latest = nodes[nodes.length - 1];
-    if (!latest) {
-      clearWaitingDisplay({ recentText: "assistant message not found" });
+    if (isAutomaticInspectionSource(source) && !isLiveAutoEnabled()) {
+      clearWaitingDisplay({ recentText: "auto off" });
       return;
     }
-    debugLog("[SK live] candidate node found", { source, totalCandidates: nodes.length });
+    if (isAutomaticInspectionSource(source)) {
+      const statusResponse = await sendMessage("GET_STATUS", { url: location.href });
+      updateLocalContext(statusResponse.context, "live_status_gate");
+      if (statusResponse.status?.autoCaptureDisabled) {
+        clearWaitingDisplay({ recentText: "auto paused for this chat" });
+        return;
+      }
+    }
+    const nodes = getAssistantMessageCandidates();
+    const liveNodes = getLiveAssistantCandidates(nodes);
+    if (source === "boot" || source === "manual_rescan") {
+      debugLog("[SK scan] visible assistant count", { count: liveNodes.length, source });
+    }
+    const latest = liveNodes[liveNodes.length - 1];
+    if (!latest) {
+      clearWaitingDisplay({ recentText: "nearby assistant message not found" });
+      return;
+    }
+    debugLog("[SK live] candidate node found", { source, totalCandidates: nodes.length, visibleCandidates: liveNodes.length });
     await inspectNodeWhenStable(latest, source === "boot" ? "boot_scan" : "latest");
   }
 
@@ -231,18 +345,123 @@
     }
     window.clearTimeout(rescanEndTimer);
     manualRescanActive = true;
-    renderStatus({ compactState: "rescanning", recentText: "rescanning visible snapshots", mode: "pending" });
+    quietRescanActive = true;
+    quietRescanStats = { candidates: 0, saved: 0, missing: 0, invalid: 0, error: 0 };
+    renderStatus({ recentText: "rescanning loaded snapshots...", mode: "pending", force: true });
     try {
-      const visibleNodes = getAssistantMessageCandidates().filter(isVisible);
-      debugLog("[SK scan] visible assistant count", { count: visibleNodes.length, source: "manual_rescan" });
-      for (const node of visibleNodes) {
+      const handle = await ensureSnapshotDirectoryHandle({ promptIfMissing: true });
+      if (!handle) {
+        renderStatus({ recentText: "rescan blocked: folder permission required", mode: "error", force: true });
+        return;
+      }
+      const candidateNodes = getLoadedSnapshotCandidateNodes();
+      quietRescanStats.candidates = candidateNodes.length;
+      debugLog("[SK scan] loaded snapshot candidate count", { count: candidateNodes.length, source: "manual_rescan" });
+      for (const node of candidateNodes) {
         await inspectNodeWhenStable(node, "manual_rescan");
       }
     } finally {
-      rescanEndTimer = window.setTimeout(() => {
-        manualRescanActive = false;
-        refreshStatus();
-      }, 500);
+      const stats = quietRescanStats;
+      manualRescanActive = false;
+      quietRescanActive = false;
+      quietRescanStats = null;
+      await refreshStatus();
+      renderStatus({
+        recentText: formatRescanSummary(stats),
+        mode: stats?.error ? "error" : "confirmed",
+        force: true
+      });
+    }
+  }
+
+  async function escapeSaveLatestAssistant() {
+    if (extensionStale) {
+      renderStatus({ recentText: "extension reloaded · refresh tab", mode: "error" });
+      return;
+    }
+    renderStatus({ recentText: "escape save starting...", mode: "pending" });
+    const handle = await ensureSnapshotDirectoryHandle({ promptIfMissing: true });
+    if (!handle) {
+      renderStatus({ recentText: "escape save blocked: folder permission required", mode: "error" });
+      return;
+    }
+    const nodes = getAssistantMessageCandidates();
+    const latest = nodes[nodes.length - 1];
+    if (!latest) {
+      renderStatus({ recentText: "escape save blocked: assistant message not found", mode: "error" });
+      return;
+    }
+    const payload = extractCandidatePayload(latest);
+    const parsed = parseAssistantPayload(payload);
+    const binding = await ensureNodeBinding(latest);
+    const markdownText = String(payload.markdownText || "").trim();
+    const rawText = String(payload.rawVisibleText || "").trim();
+    const sourceText = (markdownText || rawText).trim();
+    if (!sourceText) {
+      renderStatus({ recentText: "escape save blocked: empty assistant message", mode: "error" });
+      return;
+    }
+    const truncated = sourceText.length > ESCAPE_TEXT_MAX_CHARS;
+    const assistantText = truncated ? sourceText.slice(0, ESCAPE_TEXT_MAX_CHARS).trimEnd() : sourceText;
+    const inferredTurn = nodes.indexOf(latest) + 1;
+    const turn = Number(parsed.turn || inferredTurn || 0) || null;
+    const response = await sendMessage("ESCAPE_SNAPSHOT", {
+      turn,
+      turnSource: parsed.turn ? "snapshot_marker_or_heading" : "assistant_node_index",
+      assistantText,
+      sourceTextLength: sourceText.length,
+      truncated,
+      markerStatus: parsed.markerStatus || {},
+      nodeBinding: binding,
+      detectedAt: new Date().toISOString(),
+      source: "manual_escape"
+    });
+    const result = response.escapeResult;
+    if (!result || result.saveStateAfter === "save_error") {
+      renderStatus({
+        recentText: `escape save failed: ${result?.reason || "unknown"}`,
+        mode: "error"
+      });
+      return;
+    }
+    renderStatus({
+      recentText: result.saveStateAfter === "duplicate_ignored"
+        ? `turn ${turn || "-"} escape already saved`
+        : `turn ${turn || "-"} escape saved`,
+      mode: "confirmed"
+    });
+  }
+
+  function formatRescanSummary(stats) {
+    if (!stats) {
+      return "rescan done";
+    }
+    return `rescan done: candidates ${stats.candidates}, saved ${stats.saved}, missing ${stats.missing}, invalid ${stats.invalid}, errors ${stats.error}`;
+  }
+
+  function scheduleLoadedSnapshotScan(source = "auto_loaded_scan", delay = LOADED_SCAN_DEBOUNCE_MS) {
+    if (extensionStale || !isLiveAutoEnabled()) {
+      return;
+    }
+    window.clearTimeout(loadedScanTimer);
+    loadedScanTimer = window.setTimeout(() => {
+      scanLoadedSnapshotCandidates(source).catch(handleAsyncError);
+    }, delay);
+  }
+
+  async function scanLoadedSnapshotCandidates(source = "auto_loaded_scan") {
+    if (extensionStale || loadedScanRunning || !isLiveAutoEnabled()) {
+      return;
+    }
+    loadedScanRunning = true;
+    try {
+      const nodes = getLoadedSnapshotCandidateNodes();
+      debugLog("[SK scan] loaded snapshot candidate count", { count: nodes.length, source });
+      for (const node of nodes) {
+        await inspectNodeWhenStable(node, source);
+      }
+    } finally {
+      loadedScanRunning = false;
     }
   }
 
@@ -264,9 +483,6 @@
       }
       state.lastText = payload.rawVisibleText;
       state.retryCount = 0;
-      if (source === "latest") {
-        setWaitingDisplay("waiting for response");
-      }
       debugLog("[SK live] text stable start", {
         source,
         rawVisibleTextLength: payload.rawVisibleText.length
@@ -297,7 +513,7 @@
     if (extensionStale) {
       return;
     }
-    const mode = source === "manual_rescan" || source === "boot_scan" ? "scan" : "live";
+    const mode = isScanSource(source) ? "scan" : "live";
     const payload = extractCandidatePayload(node);
     const text = payload.rawVisibleText;
     const state = nodeState.get(node) || {};
@@ -311,7 +527,17 @@
     }
 
     const binding = await ensureNodeBinding(node);
+    if (source === "latest" && binding.autoCaptureDisabled) {
+      state.processedFingerprint = fingerprint;
+      nodeState.set(node, state);
+      clearWaitingDisplay({ recentText: "auto paused for this chat" });
+      return;
+    }
     const parsed = parseAssistantPayload(payload);
+    if (source === "latest" && isLiveInspectionPaused()) {
+      scheduleInspectionAfterRouteSettle();
+      return;
+    }
     debugLog("[SK diff]", {
       mode,
       turn: parsed.turn,
@@ -348,12 +574,24 @@
       return;
     }
 
-    await sendMessage("TURN_SEEN", {
-      turn: parsed.turn,
-      nodeBinding: binding,
-      source
-    });
+    let turnSeenResponse = { turnSeenResult: { saveStateAfter: "skipped", reason: "duplicate_turn_seen" } };
+    const turnSeenKey = `${binding.conversationKey || "unknown"}:${parsed.turn}:turn_seen:${source === "latest" ? "latest" : mode}`;
+    const shouldSendTurnSeen = source !== "latest" || markEventForProcessing(turnSeenKey);
+    if (shouldSendTurnSeen) {
+      turnSeenResponse = await sendMessage("TURN_SEEN", {
+        turn: parsed.turn,
+        nodeBinding: binding,
+        source
+      });
+    }
     if (extensionStale) {
+      return;
+    }
+    if (turnSeenResponse.turnSeenResult?.reason === "stale_node_binding") {
+      nodeBindings.delete(node);
+      state.processedFingerprint = fingerprint;
+      nodeState.set(node, state);
+      refreshStatus();
       return;
     }
     renderStatus({
@@ -369,7 +607,11 @@
     }
 
     if (binding.isAssistantSingleNode !== true) {
-      renderStatus({ recentText: `turn ${parsed.turn} seen, snapshot blocked by source check` });
+      await sendMissingCandidate(parsed, binding, "assistant_source_check_failed", source);
+      if (extensionStale) {
+        return;
+      }
+      renderStatus({ recentText: `turn ${parsed.turn} blocked by source check`, mode: "error" });
       state.processedFingerprint = fingerprint;
       nodeState.set(node, state);
       refreshStatus();
@@ -383,12 +625,6 @@
       return;
     }
     debugLog("[SK live] generation complete detected", { complete: true, source });
-
-    if (!KOREA_TIME_RE.test(text.trim())) {
-      renderStatus({ recentText: "waiting for final Korea time line" });
-      scheduleParseRetry(node, source, "korea_time_missing");
-      return;
-    }
 
     if (parsed.markerStatus.invalid) {
       const eventKey = buildEventKey(binding, parsed, "invalid", parsed.markerStatus.reason);
@@ -421,6 +657,28 @@
       state.processedFingerprint = fingerprint;
       nodeState.set(node, state);
       refreshStatus();
+      return;
+    }
+
+    if (!KOREA_TIME_RE.test(text.trim())) {
+      const retryCount = Number((nodeState.get(node) || {}).retryCount || 0);
+      if (retryCount >= PARSE_RETRY_LIMIT) {
+        await sendMissingCandidate(parsed, binding, "korea_time_missing_after_retry_limit", source);
+        if (extensionStale) {
+          return;
+        }
+        debugLog(sentEventLabel(mode, "missing_candidate"), {
+          sent: "missing",
+          turn: parsed.turn,
+          reason: "korea_time_missing_after_retry_limit"
+        });
+        state.processedFingerprint = fingerprint;
+        nodeState.set(node, state);
+        refreshStatus();
+        return;
+      }
+      renderStatus({ recentText: "waiting for final Korea time line" });
+      scheduleParseRetry(node, source, "korea_time_missing");
       return;
     }
 
@@ -458,6 +716,10 @@
         turn: parsed.turn,
         reason: "required_sections_missing"
       });
+      renderStatus({
+        recentText: `turn ${parsed.turn} missing sections ${parsed.detectedSections.length}/${SNAPSHOT_SECTIONS.length}: ${parsed.missingSections.join(", ")}`,
+        mode: "error"
+      });
       state.processedFingerprint = fingerprint;
       nodeState.set(node, state);
       refreshStatus();
@@ -469,6 +731,14 @@
       turn: parsed.turn,
       stage: "before_send"
     });
+    const snapshotEventKey = buildEventKey(binding, parsed, "snapshot_candidate", simpleFingerprint(parsed.snapshotText));
+    const shouldSendSnapshot = source === "manual_rescan" || markEventForProcessing(snapshotEventKey);
+    if (!shouldSendSnapshot) {
+      state.processedFingerprint = fingerprint;
+      nodeState.set(node, state);
+      refreshStatus();
+      return;
+    }
     renderStatus({ recentText: `turn ${parsed.turn} snapshot candidate sent`, mode: "pending" });
     const snapshotResponse = await sendMessage("SNAPSHOT_CANDIDATE", {
       turn: parsed.turn,
@@ -499,6 +769,7 @@
     if (retryCount >= PARSE_RETRY_LIMIT) {
       debugLog("[SK live] parse retry stopped", { source, reason, retryCount });
       nodeState.set(node, state);
+      finalizeRetryLimit(node, source, reason).catch(handleAsyncError);
       return;
     }
     if (state.timer) {
@@ -521,8 +792,43 @@
     });
   }
 
+  async function finalizeRetryLimit(node, source, pendingReason) {
+    if (extensionStale) {
+      return;
+    }
+    const payload = extractCandidatePayload(node);
+    const text = payload.rawVisibleText;
+    if (!text.trim()) {
+      return;
+    }
+    const binding = await ensureNodeBinding(node);
+    const parsed = parseAssistantPayload(payload);
+    if (!parsed.turn || parsed.turn % 10 !== 0) {
+      return;
+    }
+    const state = nodeState.get(node) || {};
+    const reason = pendingReason === "incomplete_snapshot"
+      ? "incomplete_snapshot_after_retry_limit"
+      : pendingReason === "korea_time_missing"
+        ? "korea_time_missing_after_retry_limit"
+        : "snapshot_parse_retry_limit";
+    await sendMissingCandidate(
+      parsed,
+      binding,
+      binding.isAssistantSingleNode === true ? reason : "assistant_source_check_failed",
+      source
+    );
+    state.processedFingerprint = simpleFingerprint(text);
+    nodeState.set(node, state);
+    refreshStatus();
+  }
+
   function sentEventLabel(mode, eventName) {
     return SENT_EVENT_LABELS[mode === "scan" ? "scan" : "live"][eventName];
+  }
+
+  function isScanSource(source) {
+    return source === "manual_rescan" || source === "boot_scan" || String(source || "").includes("_scan");
   }
 
   function formatSnapshotResult(turn, result) {
@@ -537,6 +843,9 @@
     }
     if (result.saveStateAfter === "save_error") {
       return `turn ${turn} bg save_error: ${result.reason || "unknown"}`;
+    }
+    if (result.saveStateAfter === "save_error_retry_blocked") {
+      return `turn ${turn} previous save error; use Set folder then Rescan`;
     }
     if (result.saveStateAfter === "duplicate_ignored") {
       return `turn ${turn} duplicate ignored`;
@@ -555,6 +864,9 @@
       return "confirmed";
     }
     if (result.saveStateAfter === "save_error") {
+      return "error";
+    }
+    if (result.saveStateAfter === "save_error_retry_blocked") {
       return "error";
     }
     return undefined;
@@ -580,20 +892,22 @@
       rawVisibleText.match(TURN_MARKDOWN_RE) || rawVisibleText.match(TURN_RENDERED_RE);
     const turn = turnMatch ? Number(turnMatch[1]) : null;
     const lines = splitLinesWithOffsets(markerScanText);
-    const starts = turn ? findMatchingStartLines(lines, turn) : [];
+    const allStarts = findStartLines(lines);
+    const starts = turn ? allStarts.filter((line) => Number(line.turn) === Number(turn)) : [];
+    const startTurnMismatch = Boolean(turn && allStarts.length > 0 && starts.length === 0);
     const ends = findEndLines(lines);
-    const firstStart = starts[0] || null;
+    const firstStart = starts[0] || (startTurnMismatch ? allStarts[0] : null);
     const endsBeforeStart = firstStart ? ends.filter((line) => line.offset < firstStart.offset) : [];
     const endsAfterStart = firstStart ? ends.filter((line) => line.offset > firstStart.offset) : [];
     const firstEndAfterStart = endsAfterStart[0] || null;
     const blockText = firstStart && firstEndAfterStart
       ? markerScanText.slice(firstStart.endOffset, firstEndAfterStart.offset).trim()
       : "";
-    const detectedSections = detectSections(blockText);
+    let detectedSections = detectSections(blockText);
     const markerStatus = {
-      hasStart: starts.length > 0,
+      hasStart: allStarts.length > 0,
       hasEnd: Boolean(firstEndAfterStart),
-      startCount: starts.length,
+      startCount: allStarts.length,
       endCount: ends.length,
       endCountAfterStart: endsAfterStart.length,
       markerTurn: firstStart ? firstStart.turn : null,
@@ -606,11 +920,17 @@
     let snapshotText = "";
     let parseDecision = "no_turn";
 
-    if (turn && starts.length === 0) {
+    if (turn && allStarts.length === 0) {
       parseDecision = "missing_start";
     }
 
-    if (starts.length > 1) {
+    if (startTurnMismatch) {
+      markerStatus.invalid = true;
+      markerStatus.reason = "snapshot_marker_turn_mismatch";
+      parseDecision = "invalid_marker_turn_mismatch";
+    }
+
+    if (!markerStatus.invalid && starts.length > 1) {
       markerStatus.invalid = true;
       markerStatus.reason = "ambiguous_snapshot_marker";
       parseDecision = "invalid_ambiguous_start";
@@ -635,9 +955,15 @@
     }
 
     if (!markerStatus.invalid && !markerStatus.incomplete && firstStart && firstEndAfterStart) {
-      snapshotText = extractSnapshotBodyText(markdownText, turn, detectedSections) ||
-        extractSnapshotBodyText(rawVisibleText, turn, detectedSections) ||
-        blockText;
+      snapshotText = chooseBestSnapshotText([
+        extractSnapshotBodyText(markdownText, turn, detectedSections),
+        extractSnapshotBodyText(rawVisibleText, turn, detectedSections),
+        blockText
+      ]);
+      detectedSections = uniqueStrings([
+        ...detectedSections,
+        ...detectSections(snapshotText)
+      ]);
       parseDecision = "snapshot_candidate";
     }
 
@@ -675,10 +1001,10 @@
     return lines;
   }
 
-  function findMatchingStartLines(lines, turn) {
+  function findStartLines(lines) {
     return lines.flatMap((line) => {
       const match = line.trimmed.match(/^SNAPSHOT_START\s+turn\s*=\s*(\d+)\s*$/i);
-      if (!match || Number(match[1]) !== Number(turn)) {
+      if (!match) {
         return [];
       }
       return [{
@@ -713,16 +1039,40 @@
 
   function detectSections(text) {
     const normalizedLines = String(text || "").split(/\n/).map((line) => normalizeSectionName(line));
+    const normalizedText = normalizeSectionName(text);
     return SNAPSHOT_SECTIONS
-      .map((section) => normalizeSectionName(section))
-      .filter((section) => normalizedLines.some((line) => line === section || line.startsWith(`${section} `)));
+      .map((section) => ({
+        section: normalizeSectionName(section),
+        aliases: [section, ...(SNAPSHOT_SECTION_ALIASES[section] || [])].map((alias) => normalizeSectionName(alias))
+      }))
+      .filter(({ aliases }) => aliases.some((alias) => normalizedLines.some((line) => line === alias || line.startsWith(`${alias} `)) || normalizedText.includes(alias)))
+      .map(({ section }) => section);
   }
 
   function normalizeSectionName(value) {
     return String(value || "")
       .trim()
       .replace(/^#+\s*/, "")
+      .replace(/[*_`~]/g, "")
+      .replace(/[：:]\s*$/g, "")
       .replace(/\s+/g, " ");
+  }
+
+  function uniqueStrings(values) {
+    return [...new Set((values || []).map(String).filter(Boolean))];
+  }
+
+  function chooseBestSnapshotText(candidates) {
+    return (candidates || [])
+      .map((text) => String(text || "").trim())
+      .filter(Boolean)
+      .map((text, index) => ({
+        text,
+        index,
+        sectionCount: detectSections(text).length,
+        length: text.length
+      }))
+      .sort((a, b) => b.sectionCount - a.sectionCount || b.length - a.length || a.index - b.index)[0]?.text || "";
   }
 
   function extractSnapshotBodyText(rawVisibleText, turn, detectedSections) {
@@ -754,10 +1104,6 @@
 
   async function ensureNodeBinding(node) {
     const existing = nodeBindings.get(node);
-    if (existing && !shouldRefreshBinding(existing)) {
-      return existing;
-    }
-
     const assistantNode = getAssistantRoot(node);
     const binding = existing || {
       sourceNodeId: `assistant-${++nodeSequence}`,
@@ -771,9 +1117,12 @@
 
     try {
       const response = await sendMessage("GET_CONTEXT", { url: location.href });
+      updateLocalContext(response.context, "binding");
       Object.assign(binding, {
         conversationKey: response.context?.currentConversationKey,
-        navigationEpoch: response.context?.navigationEpoch
+        navigationEpoch: response.context?.navigationEpoch,
+        autoCaptureDisabled: Boolean(response.status?.autoCaptureDisabled),
+        error: null
       });
       debugLog("[SK binding]", {
         nodeBindingConversationKey: binding.conversationKey,
@@ -796,22 +1145,38 @@
     return binding;
   }
 
-  function shouldRefreshBinding(binding) {
-    if (!binding) {
-      return true;
+  function updateLocalContext(context, source) {
+    if (!context) {
+      return;
     }
-    if (binding.url !== location.href) {
-      return true;
+    const nextKey = context.currentConversationKey || null;
+    const nextEpoch = Number(context.navigationEpoch || 0) || null;
+    const changed = Boolean(
+      currentContextKey &&
+      nextKey &&
+      (currentContextKey !== nextKey || Number(currentContextEpoch || 0) !== Number(nextEpoch || 0))
+    );
+    currentContextKey = nextKey || currentContextKey;
+    currentContextEpoch = nextEpoch || currentContextEpoch;
+    if (changed) {
+      liveInspectionPausedUntil = Date.now() + LIVE_ROUTE_SETTLE_MS;
+      debugLog("[SK route settle]", {
+        source,
+        currentContextKey,
+        currentContextEpoch,
+        pausedMs: LIVE_ROUTE_SETTLE_MS
+      });
     }
-    return Boolean(hasConversationId(location.href) && String(binding.conversationKey || "").startsWith("chatgpt:tab-"));
   }
 
-  function hasConversationId(url) {
-    try {
-      return /^\/c\/[^/?#]+/.test(new URL(url).pathname);
-    } catch {
-      return false;
-    }
+  function isLiveInspectionPaused() {
+    return Date.now() < liveInspectionPausedUntil;
+  }
+
+  function scheduleInspectionAfterRouteSettle() {
+    const delay = Math.max(250, liveInspectionPausedUntil - Date.now());
+    renderStatus({ recentText: "syncing conversation", mode: null });
+    scheduleInspection("route_settle", delay);
   }
 
   function getAssistantMessageCandidates() {
@@ -821,18 +1186,28 @@
     return [...new Set(nodes)].filter(isAssistantMessageCandidate);
   }
 
+  function getLoadedSnapshotCandidateNodes() {
+    const nodes = getAssistantMessageCandidates();
+    const candidates = nodes.filter((node) => {
+      const payload = extractCandidatePayload(node);
+      const text = payload.markerScanText || payload.rawVisibleText || "";
+      const turnMatch = text.match(TURN_MARKDOWN_RE) || text.match(TURN_RENDERED_RE);
+      const turn = turnMatch ? Number(turnMatch[1]) : null;
+      return Boolean(
+        turn && turn % 10 === 0 ||
+        /SNAPSHOT_START\s+turn\s*=\s*\d+/i.test(text) ||
+        /SNAPSHOT_END/i.test(text)
+      );
+    });
+    return candidates.slice(-LOADED_SCAN_MAX_NODES);
+  }
+
   function getAssistantRoot(node) {
     return node?.closest?.('[data-message-author-role="assistant"]') || null;
   }
 
   function isSingleAssistantMessageNode(node) {
-    if (!isAssistantMessageCandidate(node)) {
-      return false;
-    }
-    if (node.querySelector('textarea, input, [contenteditable="true"], form')) {
-      return false;
-    }
-    return true;
+    return isAssistantMessageCandidate(node);
   }
 
   function isAssistantMessageCandidate(node) {
@@ -1050,6 +1425,26 @@
     return rect.bottom > 0 && rect.top < window.innerHeight && rect.width > 0 && rect.height > 0;
   }
 
+  function getLiveAssistantCandidates(nodes) {
+    const viewportHeight = Math.max(window.innerHeight || 0, 1);
+    const upper = -viewportHeight * LIVE_CANDIDATE_VIEWPORT_MARGIN;
+    const lower = viewportHeight * (1 + LIVE_CANDIDATE_VIEWPORT_MARGIN);
+    const targetY = viewportHeight * 0.72;
+    return (nodes || [])
+      .map((node, index) => {
+        const rect = node.getBoundingClientRect();
+        const visible = rect.bottom > 0 && rect.top < viewportHeight && rect.width > 0 && rect.height > 0;
+        const nearViewport = rect.bottom > upper && rect.top < lower && rect.width > 0 && rect.height > 0;
+        const centerY = rect.top + rect.height / 2;
+        return { node, index, visible, nearViewport, score: Math.abs(centerY - targetY) };
+      })
+      .filter((entry) => entry.visible || entry.nearViewport)
+      .sort((a, b) => a.score - b.score || a.index - b.index)
+      .slice(0, 4)
+      .sort((a, b) => a.index - b.index)
+      .map((entry) => entry.node);
+  }
+
   function simpleFingerprint(text) {
     let hash = 0;
     for (let index = 0; index < text.length; index += 1) {
@@ -1077,21 +1472,23 @@
           <span data-sk-status>idle</span>
         </div>
         <div class="sk-grid">
+          <span>version</span><b data-sk-version>${escapeHtml(EXTENSION_VERSION)}</b>
           <span class="sk-debug-only">conversation</span><b class="sk-debug-only" data-sk-conversation>-</b>
           <span>turn</span><b data-sk-turn-detail>-</b>
           <span>next</span><b data-sk-next-detail>turn 10</b>
           <span>saved</span><b data-sk-saved-detail>0</b>
           <span>missing</span><b data-sk-missing>0</b>
           <span>variant</span><b data-sk-variant>0</b>
-          <span>folder</span><b data-sk-folder-detail>folder needed</b>
+          <span>escape</span><b data-sk-escape>0</b>
+          <span>auto</span><b data-sk-auto>on</b>
         </div>
         <div class="sk-recent" data-sk-recent>-</div>
         <div class="sk-actions">
           <button type="button" data-sk-set-folder>Set folder</button>
           <button type="button" data-sk-rescan>Rescan</button>
-          <button type="button" data-sk-retry>Retry</button>
-          <button type="button" data-sk-clear>Clear errors</button>
-          <button type="button" data-sk-qa-download>QA save</button>
+          <button type="button" data-sk-escape-save>Escape save</button>
+          <button type="button" data-sk-auto-toggle>Auto off</button>
+          <button type="button" data-sk-open-archive>Open archive</button>
         </div>
       </div>
     `;
@@ -1109,13 +1506,14 @@
       savedDetail: root.querySelector("[data-sk-saved-detail]"),
       missing: root.querySelector("[data-sk-missing]"),
       variant: root.querySelector("[data-sk-variant]"),
-      folderDetail: root.querySelector("[data-sk-folder-detail]"),
+      escape: root.querySelector("[data-sk-escape]"),
+      auto: root.querySelector("[data-sk-auto]"),
       recent: root.querySelector("[data-sk-recent]"),
       setFolder: root.querySelector("[data-sk-set-folder]"),
       rescan: root.querySelector("[data-sk-rescan]"),
-      retry: root.querySelector("[data-sk-retry]"),
-      clear: root.querySelector("[data-sk-clear]"),
-      qaDownload: root.querySelector("[data-sk-qa-download]")
+      escapeSave: root.querySelector("[data-sk-escape-save]"),
+      autoToggle: root.querySelector("[data-sk-auto-toggle]"),
+      openArchive: root.querySelector("[data-sk-open-archive]")
     };
   }
 
@@ -1137,42 +1535,72 @@
       });
     });
     bar.rescan.addEventListener("click", () => {
-      renderStatus({ recentText: "rescanning visible assistant messages" });
+      renderStatus({ recentText: "rescanning loaded snapshots" });
       rescanVisibleMessages().catch((error) => renderStatus({ recentText: String(error?.message || error) }));
     });
-    bar.retry.addEventListener("click", async () => {
-      const response = await sendMessage("GET_STATUS", {});
-      const latest = response.status?.latest;
-      if (!latest || latest.saveState !== "save_error") {
-        renderStatus({ recentText: "no failed save to retry" });
-        return;
-      }
-      await sendMessage("RETRY_SAVE", {
-        conversationKey: response.status.conversationKey,
-        turn: latest.turn
-      });
-      refreshStatus();
-    });
-    bar.clear.addEventListener("click", async () => {
-      const response = await sendMessage("CLEAR_ERRORS", {});
-      await refreshStatus();
-      renderStatus({
-        recentText: response.clearedDownloadPathBroken ? "download block cleared" : "errors cleared",
-        mode: "pending"
+    bar.escapeSave.addEventListener("click", () => {
+      escapeSaveLatestAssistant().catch((error) => {
+        renderStatus({ recentText: `escape save failed: ${String(error?.message || error)}`, mode: "error" });
       });
     });
-    bar.qaDownload.addEventListener("click", async () => {
-      renderStatus({ recentText: "QA save starting...", mode: "pending" });
+    bar.autoToggle.addEventListener("click", () => {
+      toggleAutoLiveCapture().catch((error) => {
+        renderStatus({ recentText: `auto toggle failed: ${String(error?.message || error)}`, mode: "error" });
+      });
+    });
+    bar.openArchive.addEventListener("click", async () => {
+      renderStatus({ recentText: "opening archive folder...", mode: "pending" });
       try {
-        const response = await sendMessage("QA_DOWNLOAD_TEST", { url: location.href });
-        const result = response.qaDownloadResult;
+        const response = await sendMessage("OPEN_ARCHIVE_FOLDER", {});
+        if (!response.opened) {
+          renderStatus({
+            recentText: `open archive failed: ${response.error || "blocked"}`,
+            mode: "error"
+          });
+          return;
+        }
+        const openMode = response.openMode === "explorer_native" ? "Explorer" : "file tab";
         renderStatus({
-          recentText: result?.writeId ? `QA file saved ${result.writeId}` : `QA file ${result?.saveStateAfter || "done"}`,
-          mode: result?.saveStateAfter === "save_error" ? "error" : "confirmed"
+          recentText: `opened archive in ${openMode}`,
+          mode: "confirmed"
         });
       } catch (error) {
-        renderStatus({ recentText: `QA save failed: ${String(error?.message || error)}`, mode: "error" });
+        renderStatus({ recentText: `open archive failed: ${String(error?.message || error)}`, mode: "error" });
       }
+    });
+  }
+
+  async function toggleAutoLiveCapture() {
+    if (extensionStale) {
+      renderStatus({ recentText: "extension reloaded · refresh tab", mode: "error" });
+      return;
+    }
+    if (!autoLiveEnabled) {
+      await setAutoLiveEnabled(true);
+      renderStatus({ auto: "on", recentText: "auto on", mode: "confirmed" });
+      startLiveAutoCapture("manual_toggle");
+      refreshStatus().catch((error) => renderStatus({ recentText: String(error?.message || error), mode: "error" }));
+      return;
+    }
+
+    const statusResponse = await sendMessage("GET_STATUS", { url: location.href });
+    updateLocalContext(statusResponse.context, "auto_toggle_status");
+    if (statusResponse.status?.autoCaptureDisabled) {
+      const clearResponse = await sendMessage("CLEAR_AUTO_GUARD", { url: location.href });
+      updateLocalContext(clearResponse.context || statusResponse.context, "auto_guard_cleared");
+      renderStatus({ auto: "on", recentText: "auto resumed", mode: "confirmed" });
+      startLiveAutoCapture("auto_resume");
+      refreshStatus().catch((error) => renderStatus({ recentText: String(error?.message || error), mode: "error" }));
+      return;
+    }
+
+    await setAutoLiveEnabled(false);
+    stopLiveAutoCapture();
+    renderStatus({
+      auto: "off",
+      compactState: hasDisplayedTurn() ? "ready" : "empty",
+      recentText: "auto off",
+      mode: null
     });
   }
 
@@ -1352,6 +1780,28 @@
       };
       tx.onerror = () => reject(tx.error || new Error("indexed_db_delete_failed"));
     });
+  }
+
+  async function restoreAutoLiveEnabled() {
+    try {
+      const value = await readSettingsValue(AUTO_LIVE_ENABLED_KEY);
+      autoLiveEnabled = value !== false;
+    } catch (error) {
+      autoLiveEnabled = true;
+      throw error;
+    }
+    return autoLiveEnabled;
+  }
+
+  async function setAutoLiveEnabled(enabled) {
+    autoLiveEnabled = Boolean(enabled);
+    renderAutoStatus();
+    try {
+      await writeSettingsValue(AUTO_LIVE_ENABLED_KEY, autoLiveEnabled);
+    } catch (error) {
+      debugLog("[SK auto] persist failed", { error: String(error?.message || error) });
+    }
+    return autoLiveEnabled;
   }
 
   async function ensureDirectoryWritePermission(handle, { request = false } = {}) {
@@ -1562,6 +2012,9 @@
           }));
         return true;
       }
+      if (quietRescanActive && recordQuietRescanMessage(message)) {
+        return undefined;
+      }
       let shouldRefresh = true;
       if (message.type === "SAVE_PENDING") {
         renderStatus({ waiting: false, recentText: `turn ${message.turn} saving...`, mode: "pending" });
@@ -1570,6 +2023,16 @@
         showNotice("Saved", `turn ${message.turn} snapshot saved`, "success", true, `saved:${message.conversationKey}:${message.turn}:${message.filePath}`);
       } else if (message.type === "MISSING_PENDING") {
         renderStatus({ waiting: false, recentText: `turn ${message.turn} missing record saving...`, mode: "pending" });
+      } else if (message.type === "MISSING_CONFIRMED") {
+        const reason = message.reason || "missing snapshot";
+        renderStatus({ waiting: false, recentText: `turn ${message.turn} missing: ${reason}`, mode: "error" });
+        showNotice("Missing snapshot", `turn ${message.turn}: ${reason}`, "error", false, `missing:${message.conversationKey}:${message.turn}:${reason}`);
+      } else if (message.type === "ESCAPE_CONFIRMED") {
+        renderStatus({ waiting: false, recentText: `turn ${message.turn || "-"} escape saved`, mode: "confirmed" });
+        showNotice("Escape saved", `turn ${message.turn || "-"} manual checkpoint saved`, "success", true, `escape:${message.conversationKey}:${message.turn}:${message.filePath}`);
+      } else if (message.type === "ESCAPE_ERROR") {
+        renderStatus({ waiting: false, recentText: `turn ${message.turn || "-"} escape error`, mode: "error" });
+        showNotice("Escape save error", message.reason || "escape save failed", "error", false, `escape-error:${message.conversationKey}:${message.turn}:${message.reason}`);
       } else if (message.type === "INVALID_SNAPSHOT") {
         renderStatus({ waiting: false, recentText: `turn ${message.turn} invalid snapshot`, mode: "error" });
         showNotice("Invalid snapshot", message.reason || "invalid marker", "error", false, message.toastKey || `invalid:${message.conversationKey}:${message.turn}:${message.reason}`);
@@ -1595,13 +2058,39 @@
     });
   }
 
+  function recordQuietRescanMessage(message) {
+    if (!quietRescanStats || !message?.type) {
+      return false;
+    }
+    if (message.type === "SAVE_PENDING" || message.type === "MISSING_PENDING") {
+      return true;
+    }
+    if (message.type === "SAVE_CONFIRMED") {
+      quietRescanStats.saved += 1;
+      return true;
+    }
+    if (message.type === "MISSING_CONFIRMED") {
+      quietRescanStats.missing += 1;
+      return true;
+    }
+    if (message.type === "INVALID_SNAPSHOT") {
+      quietRescanStats.invalid += 1;
+      return true;
+    }
+    if (message.type === "SAVE_ERROR") {
+      quietRescanStats.error += 1;
+      return true;
+    }
+    return false;
+  }
+
   async function refreshStatus() {
     if (extensionStale) {
       renderStatus({ recentText: "extension reloaded · refresh tab", mode: "error" });
       return;
     }
     try {
-      const response = await sendMessage("GET_STATUS", {});
+      const response = await sendMessage("GET_STATUS", { url: location.href });
       if (extensionStale || response.contextInvalidated) {
         renderStatus({ recentText: "extension reloaded · refresh tab", mode: "error" });
         return;
@@ -1611,29 +2100,69 @@
         renderStatus({ compactState: "empty", recentText: "waiting for conversation" });
         return;
       }
-      const displayTurn = status.displayTurn || status.visibleTurn || status.lastSeenTurn || 0;
+      const displayTurn = Number.isFinite(Number(status.displayTurn))
+        ? Number(status.displayTurn)
+        : Number(status.visibleTurn || status.lastSeenTurn || 0);
       renderStatus({
         compactState: manualRescanActive ? "rescanning" : displayTurn > 0 ? "ready" : "empty",
+        mode: modeForStatus(status),
         conversation: shortConversation(status.conversationKey),
         currentTurn: displayTurn,
         nextTurn: status.nextSnapshotTurn || 10,
         saved: status.savedCount || 0,
         missing: status.missingCount || 0,
         variant: status.variantCount || 0,
-        recentText: status.visibleTurn && status.lastSeenTurn && status.visibleTurn < status.lastSeenTurn
-          ? `visible turn ${status.visibleTurn}; stored ${status.lastSeenTurn}`
-          : status.latest ? `${status.latest.recordType}: ${status.latest.saveState}` : "ready"
+        escape: status.escapeCount || 0,
+        auto: formatAutoStatus(status),
+        recentText: !autoLiveEnabled
+          ? "auto off"
+          : status.autoCaptureDisabled
+          ? "auto paused for this chat"
+          : status.visibleTurnSyncPending
+          ? "syncing conversation"
+          : status.latest ? formatLatestStatus(status.latest) : "ready"
       });
     } catch (error) {
       renderStatus({ recentText: String(error?.message || error), mode: "error" });
     }
   }
 
+  function formatLatestStatus(latest) {
+    if (!latest) {
+      return "ready";
+    }
+    if (latest.recordType === "missing") {
+      const sections = (latest.missingSections || []).join(", ");
+      return sections
+        ? `missing: ${latest.reason || latest.saveState}; sections ${sections}`
+        : `missing: ${latest.reason || latest.saveState}`;
+    }
+    if (latest.recordType === "error") {
+      return `error: ${latest.error || latest.saveState || "unknown"}`;
+    }
+    return `${latest.recordType}: ${latest.saveState}`;
+  }
+
+  function modeForStatus(status) {
+    if (!autoLiveEnabled || !status || status.autoCaptureDisabled || status.visibleTurnSyncPending || status.storageAheadOfVisible || !status.latest) {
+      return null;
+    }
+    if (status.latest.recordType === "missing" || status.latest.recordType === "error") {
+      return "error";
+    }
+    return null;
+  }
+
   function renderStatus(update) {
     if (!floatingBar) {
       return;
     }
-    if (update.mode) {
+    if (quietRescanActive && !update.force) {
+      return;
+    }
+    if (update.mode === null) {
+      delete floatingBar.root.dataset.mode;
+    } else if (update.mode) {
       floatingBar.root.dataset.mode = update.mode;
     }
     if (update.compactState !== undefined) {
@@ -1670,6 +2199,14 @@
     if (update.variant !== undefined) {
       floatingBar.variant.textContent = String(update.variant);
     }
+    if (update.escape !== undefined) {
+      floatingBar.escape.textContent = String(update.escape);
+    }
+    if (update.auto !== undefined) {
+      renderAutoStatus(update.auto);
+    } else {
+      renderAutoToggleLabel();
+    }
     if (update.recentText !== undefined) {
       floatingBar.recent.textContent = update.recentText;
       floatingBar.status.textContent = update.recentText;
@@ -1677,8 +2214,45 @@
     renderFolderStatus();
   }
 
+  function formatAutoStatus(status) {
+    if (!autoLiveEnabled) {
+      return "off";
+    }
+    if (status?.autoCaptureDisabled) {
+      return "paused";
+    }
+    return "on";
+  }
+
+  function renderAutoStatus(statusOrLabel) {
+    if (!floatingBar) {
+      return;
+    }
+    const label = typeof statusOrLabel === "string" ? statusOrLabel : formatAutoStatus(statusOrLabel);
+    if (floatingBar.auto) {
+      floatingBar.auto.textContent = label;
+    }
+    renderAutoToggleLabel(label);
+  }
+
+  function renderAutoToggleLabel(label = floatingBar?.auto?.textContent || formatAutoStatus()) {
+    if (!floatingBar?.autoToggle) {
+      return;
+    }
+    if (label === "off") {
+      floatingBar.autoToggle.textContent = "Auto on";
+    } else if (label === "paused") {
+      floatingBar.autoToggle.textContent = "Auto resume";
+    } else {
+      floatingBar.autoToggle.textContent = "Auto off";
+    }
+  }
+
   function renderFolderStatus() {
     if (!floatingBar) {
+      return;
+    }
+    if (!floatingBar.folderDetail) {
       return;
     }
     const label = getFolderStatusLabel();

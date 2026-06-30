@@ -1,16 +1,28 @@
 const STORAGE_KEY = "snapshotKeeperState";
 const LEGACY_DOWNLOAD_ROOT = "ChatGPT-Snapshots";
+const DEFAULT_ARCHIVE_ROOT = "D:/_my_tools/ChatGPT_Snapshot_Archive";
+const DEFAULT_ARCHIVE_FOLDER = `${DEFAULT_ARCHIVE_ROOT}/archive`;
 const PATH_SCHEMA_VERSION = 2;
+const APP_VERSION = chrome.runtime.getManifest?.().version || "unknown";
+const GIT_COMMIT = null;
+const TEST_MODE = null;
+const UI_STATE = null;
+const FILE_WRITER = "file_system_access";
 const SNAPSHOT_SECTIONS = [
   "### 현재 진행 중인 주제",
   "### 새로 확정된 사항",
   "### 미확정 사항",
-  "### 제외된 주제 (1회 기록)",
+  "### 제외된 주제",
   "### 앞으로 할 일"
 ];
 const BODY_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const MAX_ERROR_BODIES = 20;
-const DEBUG = true;
+const AUTO_GUARD_WINDOW_MS = 60 * 1000;
+const AUTO_GUARD_PATH_CHURN_LIMIT = 5;
+const AUTO_GUARD_REPEAT_TURN_LIMIT = 5;
+const AUTO_GUARD_STALE_LIMIT = 3;
+const AUTO_GUARD_MISSING_LIMIT = 2;
+const DEBUG = false;
 
 let writerQueue = Promise.resolve();
 
@@ -47,17 +59,38 @@ async function handleMessage(message, sender) {
   }
 
   if (message.type === "GET_CONTEXT") {
-    const context = await enqueueWriter(() => updateTabContext(tabId, message.url, "content_context"));
-    return { context };
+    const context = await enqueueWriter(() => updateTabContext(tabId, getMessageUrl(message), "content_context"));
+    const state = await readState();
+    return {
+      context,
+      status: getConversationStatus(state, context?.currentConversationKey, context)
+    };
   }
 
   if (message.type === "GET_STATUS") {
-    const state = await readState();
-    const context = getTabContextSnapshot(state, tabId);
+    let state = await readState();
+    let context = getTabContextSnapshot(state, tabId);
+    const url = getMessageUrl(message);
+    if (url && (!context || getPathKey(context.currentUrl) !== getPathKey(url))) {
+      context = await enqueueWriter(() => updateTabContext(tabId, url, "status_context"));
+      state = await readState();
+    }
     return {
       status: getConversationStatus(state, context?.currentConversationKey, context),
       context
     };
+  }
+
+  if (message.type === "CLEAR_AUTO_GUARD") {
+    const url = getMessageUrl(message);
+    if (url) {
+      await enqueueWriter(() => updateTabContext(tabId, url, "auto_guard_clear_context"));
+    }
+    return enqueueWriter(() => clearAutoCaptureGuard(tabId));
+  }
+
+  if (message.type === "OPEN_ARCHIVE_FOLDER") {
+    return openArchiveFolder();
   }
 
   if (message.type === "TURN_SEEN" || message.type === "TURN_OBSERVED") {
@@ -76,6 +109,10 @@ async function handleMessage(message, sender) {
 
   if (message.type === "MISSING_CANDIDATE") {
     return enqueueWriter(() => handleMissingCandidate(tabId, message.payload));
+  }
+
+  if (message.type === "ESCAPE_SNAPSHOT") {
+    return enqueueWriter(() => handleEscapeSnapshot(tabId, message.payload));
   }
 
   if (message.type === "INVALID_SNAPSHOT") {
@@ -99,6 +136,10 @@ async function handleMessage(message, sender) {
   }
 
   throw new Error(`Unsupported message type: ${message.type}`);
+}
+
+function getMessageUrl(message) {
+  return message?.url || message?.payload?.url || "";
 }
 
 function enqueueWriter(task) {
@@ -141,6 +182,18 @@ async function updateTabContext(tabId, url, source) {
   }
   return withState(async (state) => {
     const previous = state.tabs[String(tabId)] || {};
+    if (shouldIgnoreNavigationContextUpdate(previous, url, source)) {
+      appendEvent(state, {
+        type: "stale_navigation_context_ignored",
+        tabId,
+        previousConversationKey: previous.currentConversationKey || null,
+        previousUrl: previous.currentUrl || "",
+        incomingUrl: url || "",
+        previousSource: previous.source || null,
+        incomingSource: source || null
+      });
+      return state;
+    }
     const resolved = resolveConversationKey(state, tabId, url, previous.currentConversationKey);
     let conversationKey = resolved.conversationKey;
 
@@ -150,17 +203,19 @@ async function updateTabContext(tabId, url, source) {
 
     const previousPathKey = getPathKey(previous.currentUrl);
     const nextPathKey = getPathKey(url);
-    const changed = previousPathKey !== nextPathKey || previous.currentConversationKey !== conversationKey;
-    const navigationEpoch = changed ? Number(previous.navigationEpoch || 0) + 1 : Number(previous.navigationEpoch || 1);
+    const pathChanged = previousPathKey !== nextPathKey;
+    const conversationChanged = previous.currentConversationKey !== conversationKey;
+    const navigationEpoch = conversationChanged ? Number(previous.navigationEpoch || 0) + 1 : Number(previous.navigationEpoch || 1);
 
     state.tabs[String(tabId)] = {
       tabId,
       currentUrl: url || previous.currentUrl || "",
       currentConversationKey: conversationKey,
       navigationEpoch,
-      visibleTurn: changed ? 0 : Number(previous.visibleTurn || 0),
-      visibleTurnSource: changed ? null : previous.visibleTurnSource || null,
-      visibleTurnSeenAt: changed ? null : previous.visibleTurnSeenAt || null,
+      visibleTurn: conversationChanged ? 0 : Number(previous.visibleTurn || 0),
+      visibleTurnSource: conversationChanged ? null : previous.visibleTurnSource || null,
+      visibleTurnSeenAt: conversationChanged ? null : previous.visibleTurnSeenAt || null,
+      visibleTurnSyncPending: conversationChanged ? true : Boolean(previous.visibleTurnSyncPending && !Number(previous.visibleTurn || 0)),
       lastSeenAt: nowIso(),
       source
     };
@@ -176,11 +231,35 @@ async function updateTabContext(tabId, url, source) {
       tabId,
       conversationKey,
       navigationEpoch,
-      source
+      source,
+      pathChanged,
+      conversationChanged
+    });
+    updateAutoCaptureGuard(state, conversation, {
+      type: "context",
+      tabId,
+      source,
+      pathChanged,
+      conversationChanged
     });
 
     return state;
   }).then((state) => getTabContextSnapshot(state, tabId));
+}
+
+function shouldIgnoreNavigationContextUpdate(previous, incomingUrl, source) {
+  if (!source || !String(source).startsWith("navigation_")) {
+    return false;
+  }
+  if (!["content_context", "status_context"].includes(previous?.source)) {
+    return false;
+  }
+  const previousParsed = parseChatGptUrl(previous.currentUrl || "");
+  const incomingParsed = parseChatGptUrl(incomingUrl || "");
+  if (!previousParsed.conversationId || !incomingParsed.conversationId) {
+    return false;
+  }
+  return previousParsed.conversationId !== incomingParsed.conversationId;
 }
 
 function resolveConversationKey(state, tabId, url, previousKey) {
@@ -193,6 +272,17 @@ function resolveConversationKey(state, tabId, url, previousKey) {
       conversationId: parsed.conversationId,
       isTemporary: false,
       url: parsed.href,
+      displayTitle: null
+    };
+  }
+
+  if (previousKey) {
+    return {
+      conversationKey: previousKey,
+      officialKey: previousKey.startsWith("chatgpt:c-") ? previousKey : null,
+      conversationId: null,
+      isTemporary: previousKey.startsWith("chatgpt:tab-"),
+      url: parsed.href || url || "",
       displayTitle: null
     };
   }
@@ -249,6 +339,12 @@ function migrateConversation(state, temporaryKey, officialKey) {
 
   const temporary = state.conversations[temporaryKey];
   const official = state.conversations[officialKey];
+  if (official?.previousConversationKeys?.includes(temporaryKey)) {
+    if (temporary) {
+      delete state.conversations[temporaryKey];
+    }
+    return officialKey;
+  }
   if (!temporary) {
     ensureConversation(state, officialKey, { conversationKey: officialKey, isTemporary: false });
     return officialKey;
@@ -297,6 +393,11 @@ function mergeConversations(target, source, sourceKey) {
     savedTurns: uniqueNumbers([...(source.savedTurns || []), ...(target.savedTurns || [])]),
     missingTurns: uniqueNumbers([...(source.missingTurns || []), ...(target.missingTurns || [])]),
     variantTurns: uniqueNumbers([...(source.variantTurns || []), ...(target.variantTurns || [])]),
+    resolvedMissingTurns: uniqueNumbers([...(source.resolvedMissingTurns || []), ...(target.resolvedMissingTurns || [])]),
+    resolvedMissing: {
+      ...(source.resolvedMissing || {}),
+      ...(target.resolvedMissing || {})
+    },
     lastSeenTurn: Math.max(Number(source.lastSeenTurn || 0), Number(target.lastSeenTurn || 0)),
     turns,
     previousConversationKeys: uniqueStrings([...(target.previousConversationKeys || []), ...(source.previousConversationKeys || []), sourceKey])
@@ -323,9 +424,19 @@ function ensureConversation(state, conversationKey, resolved = {}) {
 }
 
 async function recordTurnSeen(tabId, payload) {
+  let turnSeenResult = {
+    turn: Number(payload?.turn || 0) || null,
+    saveStateAfter: "not_processed",
+    reason: null
+  };
   return withState(async (state) => {
     const bindingCheck = validateTurnBinding(state, tabId, payload?.nodeBinding);
     if (!bindingCheck.ok) {
+      turnSeenResult = {
+        turn: Number(payload?.turn || 0) || null,
+        saveStateAfter: "rejected",
+        reason: bindingCheck.reason
+      };
       appendEvent(state, {
         type: "turn_seen_rejected",
         tabId,
@@ -335,6 +446,12 @@ async function recordTurnSeen(tabId, payload) {
     }
 
     const conversation = ensureConversation(state, bindingCheck.conversationKey);
+    updateAutoCaptureGuard(state, conversation, {
+      type: "turn_seen",
+      tabId,
+      source: payload.source || null,
+      turn: Number(payload.turn)
+    });
     if (payload.source === "latest") {
       updateVisibleTurn(state, tabId, bindingCheck.conversationKey, Number(payload.turn), payload.source || null);
     } else {
@@ -356,9 +473,16 @@ async function recordTurnSeen(tabId, payload) {
       source: payload.source || null,
       sourceSingle: payload.nodeBinding?.isAssistantSingleNode === true
     });
+    turnSeenResult = {
+      conversationKey: conversation.conversationKey,
+      turn: Number(payload.turn),
+      saveStateAfter: "accepted",
+      reason: null
+    };
     return state;
   }).then((state) => ({
-    status: getTabConversationStatus(state, tabId)
+    status: getTabConversationStatus(state, tabId),
+    turnSeenResult
   }));
 }
 
@@ -372,6 +496,27 @@ async function handleSnapshotCandidate(tabId, payload) {
   return withState(async (state) => {
     const bindingCheck = validateBinding(state, tabId, payload?.nodeBinding);
     if (!bindingCheck.ok) {
+      if (isStaleBindingReason(bindingCheck.reason)) {
+        snapshotResult = {
+          turn: Number(payload?.turn || 0) || null,
+          saveStateAfter: "stale_ignored",
+          reason: bindingCheck.reason,
+          downloadCalled: false
+        };
+        appendEvent(state, {
+          type: "snapshot_candidate_stale_ignored",
+          tabId,
+          turn: Number(payload?.turn || 0) || null,
+          reason: bindingCheck.reason
+        });
+        updateAutoCaptureGuard(state, ensureConversation(state, payload?.nodeBinding?.conversationKey || "unknown"), {
+          type: "stale",
+          tabId,
+          source: payload?.source || null,
+          turn: Number(payload?.turn || 0) || null
+        });
+        return state;
+      }
       snapshotResult = {
         turn: Number(payload?.turn || 0) || null,
         saveStateAfter: "save_error",
@@ -394,7 +539,7 @@ async function handleSnapshotCandidate(tabId, payload) {
 
     const existing = conversation.turns[String(turn)];
     const duplicate = findExistingHashRecord(existing, normalizedHash);
-    if (duplicate && ["save_pending", "save_confirmed", "save_error"].includes(duplicate.saveState)) {
+    if (duplicate && ["save_pending", "save_confirmed"].includes(duplicate.saveState)) {
       appendEvent(state, {
         type: "duplicate_ignored",
         conversationKey: conversation.conversationKey,
@@ -415,8 +560,36 @@ async function handleSnapshotCandidate(tabId, payload) {
       });
       return state;
     }
+    if (duplicate?.saveState === "save_error" && payload.source !== "manual_rescan") {
+      appendEvent(state, {
+        type: "save_error_auto_retry_blocked",
+        conversationKey: conversation.conversationKey,
+        turn,
+        filePath: duplicate.filePath || null,
+        source: payload.source || null,
+        error: duplicate.error || null
+      });
+      snapshotResult = {
+        conversationKey: conversation.conversationKey,
+        turn,
+        saveStateAfter: "save_error_retry_blocked",
+        reason: duplicate.error || "previous_save_error",
+        existingState: duplicate.saveState,
+        downloadCalled: false,
+        filePath: duplicate.filePath || null
+      };
+      debugLog("[SK bg] saveStateAfter", {
+        ...snapshotResult
+      });
+      return state;
+    }
 
+    const previousRecord = existing || null;
     const isVariant = Boolean(existing?.normalizedHash && existing.normalizedHash !== normalizedHash);
+    const runtimeMetadata = buildRuntimeMetadata(payload.source || null);
+    const variantMetadata = isVariant
+      ? buildVariantMetadata(existing, turn, payload.source || null)
+      : null;
     const bodyKey = bodyStorageKey(conversation.conversationKey, turn, normalizedHash);
     const filePath = buildSnapshotPath(conversation, turn, isVariant ? "variant" : "saved", normalizedHash);
     const markdown = buildSavedMarkdown({
@@ -427,7 +600,9 @@ async function handleSnapshotCandidate(tabId, payload) {
       normalizedHash,
       filePath,
       snapshotText,
-      binding: payload.nodeBinding
+      binding: payload.nodeBinding,
+      scanMode: payload.source || null,
+      variantMetadata
     });
 
     state.pendingBodies[bodyKey] = {
@@ -465,6 +640,9 @@ async function handleSnapshotCandidate(tabId, payload) {
         rawHash,
         downloadId: null,
         filePath,
+        ...runtimeMetadata,
+        ...(variantMetadata || {}),
+        ...(isVariant ? { variantIndex: (existing.variants || []).length + 1 } : {}),
         error: reason,
         timestamps: {
           detectedAt: payload.detectedAt || nowIso(),
@@ -520,6 +698,7 @@ async function handleSnapshotCandidate(tabId, payload) {
       filePath,
       actualPath: writeResult.actualPath,
       writer: writeResult.writer,
+      ...runtimeMetadata,
       timestamps: {
         detectedAt: payload.detectedAt || nowIso(),
         confirmedAt: nowIso()
@@ -539,8 +718,9 @@ async function handleSnapshotCandidate(tabId, payload) {
         filePath,
         actualPath: writeResult.actualPath,
         writer: writeResult.writer,
-        variantOf: existing.filePath || null,
         variantIndex: (existing.variants || []).length + 1,
+        ...runtimeMetadata,
+        ...(variantMetadata || {}),
         timestamps: {
           detectedAt: payload.detectedAt || nowIso(),
           confirmedAt: nowIso()
@@ -554,7 +734,7 @@ async function handleSnapshotCandidate(tabId, payload) {
       conversation.variantTurns = uniqueNumbers([...(conversation.variantTurns || []), turn]);
     } else {
       conversation.turns[String(turn)] = turnRecord;
-      conversation.savedTurns = uniqueNumbers([...(conversation.savedTurns || []), turn]);
+      markTurnSaved(conversation, turn, previousRecord, payload.source || null);
     }
     delete state.pendingBodies[bodyKey];
 
@@ -611,26 +791,132 @@ function findExistingHashRecord(turnRecord, normalizedHash) {
   return (turnRecord.variants || []).find((variant) => variant.normalizedHash === normalizedHash) || null;
 }
 
+function isStaleBindingReason(reason) {
+  return reason === "stale_node_binding";
+}
+
+function sameStringList(left, right) {
+  const leftValues = (left || []).map(String);
+  const rightValues = (right || []).map(String);
+  return leftValues.length === rightValues.length && leftValues.every((value, index) => value === rightValues[index]);
+}
+
+function sameMissingRecord(record, reason, missingSections) {
+  return record?.recordType === "missing" &&
+    record.saveState === "save_confirmed" &&
+    String(record.reason || "") === String(reason || "") &&
+    sameStringList(record.missingSections || [], missingSections || []);
+}
+
+function removeNumber(values, target) {
+  return uniqueNumbers(values || []).filter((value) => value !== Number(target));
+}
+
+function markTurnSaved(conversation, turn, previousRecord = null, source = null) {
+  conversation.savedTurns = uniqueNumbers([...(conversation.savedTurns || []), turn]);
+  if (previousRecord?.recordType === "missing") {
+    conversation.missingTurns = removeNumber(conversation.missingTurns || [], turn);
+    conversation.resolvedMissingTurns = uniqueNumbers([...(conversation.resolvedMissingTurns || []), turn]);
+    conversation.resolvedMissing = {
+      ...(conversation.resolvedMissing || {}),
+      [String(turn)]: {
+        turn,
+        previousReason: previousRecord.reason || null,
+        previousFilePath: previousRecord.filePath || null,
+        resolvedAt: nowIso(),
+        resolvedBy: source || "snapshot_candidate"
+      }
+    };
+  }
+}
+
 async function handleMissingCandidate(tabId, payload) {
   return withState(async (state) => {
     const bindingCheck = validateBinding(state, tabId, payload?.nodeBinding);
     if (!bindingCheck.ok) {
+      if (isStaleBindingReason(bindingCheck.reason)) {
+        appendEvent(state, {
+          type: "missing_candidate_stale_ignored",
+          tabId,
+          turn: Number(payload?.turn || 0) || null,
+          reason: bindingCheck.reason
+        });
+        updateAutoCaptureGuard(state, ensureConversation(state, payload?.nodeBinding?.conversationKey || "unknown"), {
+          type: "stale",
+          tabId,
+          source: payload?.source || null,
+          turn: Number(payload?.turn || 0) || null
+        });
+        return state;
+      }
       recordSaveError(state, tabId, payload, bindingCheck.reason);
       return state;
     }
 
     const turn = Number(payload.turn);
     const conversation = ensureConversation(state, bindingCheck.conversationKey);
+    const runtimeMetadata = buildRuntimeMetadata(payload.source || null);
+    updateAutoCaptureGuard(state, conversation, {
+      type: "missing",
+      tabId,
+      source: payload.source || null,
+      turn,
+      reason: payload.reason || "snapshot_markers_or_sections_missing"
+    });
     updateLastSeenTurn(state, conversation, turn, tabId);
+    const reason = payload.reason || "snapshot_markers_or_sections_missing";
+    const missingSections = payload.missingSections || [];
+    const existing = conversation.turns[String(turn)];
+
+    if (existing?.saveState === "save_confirmed" && existing.recordType !== "missing") {
+      appendEvent(state, {
+        type: "missing_after_saved_ignored",
+        conversationKey: conversation.conversationKey,
+        turn,
+        reason,
+        missingSections
+      });
+      return state;
+    }
+
+    if (sameMissingRecord(existing, reason, missingSections)) {
+      existing.timestamps = {
+        ...(existing.timestamps || {}),
+        repeatedAt: nowIso()
+      };
+      existing.repeatCount = Number(existing.repeatCount || 1) + 1;
+      appendEvent(state, {
+        type: "missing_duplicate_ignored",
+        conversationKey: conversation.conversationKey,
+        turn,
+        filePath: existing.filePath || null,
+        reason,
+        missingSections,
+        repeatCount: existing.repeatCount
+      });
+      notifyTab(tabId, {
+        type: "MISSING_CONFIRMED",
+        turn,
+        conversationKey: conversation.conversationKey,
+        filePath: existing.filePath || null,
+        actualPath: existing.actualPath || null,
+        reason,
+        missingSections,
+        repeated: true
+      });
+      return state;
+    }
+
     const filePath = buildSnapshotPath(conversation, turn, "missing", "missing");
     const markdown = buildMissingMarkdown({
       conversation,
       turn,
       filePath,
       markerStatus: payload.markerStatus,
-      missingSections: payload.missingSections || [],
-      reason: payload.reason || "snapshot_markers_or_sections_missing",
-      binding: payload.nodeBinding
+      missingSections,
+      reason,
+      binding: payload.nodeBinding,
+      scanMode: payload.source || null
     });
     let writeResult;
     try {
@@ -645,8 +931,9 @@ async function handleMissingCandidate(tabId, payload) {
         rawHash: null,
         downloadId: null,
         filePath,
+        ...runtimeMetadata,
         markerStatus: payload.markerStatus || {},
-        missingSections: payload.missingSections || [],
+        missingSections,
         reason,
         timestamps: {
           detectedAt: payload.detectedAt || nowIso(),
@@ -680,9 +967,10 @@ async function handleMissingCandidate(tabId, payload) {
       filePath,
       actualPath: writeResult.actualPath,
       writer: writeResult.writer,
+      ...runtimeMetadata,
       markerStatus: payload.markerStatus || {},
-      missingSections: payload.missingSections || [],
-      reason: payload.reason || "snapshot_markers_or_sections_missing",
+      missingSections,
+      reason,
       timestamps: {
         detectedAt: payload.detectedAt || nowIso(),
         confirmedAt: nowIso()
@@ -700,11 +988,13 @@ async function handleMissingCandidate(tabId, payload) {
     });
 
     notifyTab(tabId, {
-      type: "SAVE_CONFIRMED",
+      type: "MISSING_CONFIRMED",
       turn,
       conversationKey: conversation.conversationKey,
       filePath,
-      actualPath: writeResult.actualPath
+      actualPath: writeResult.actualPath,
+      reason,
+      missingSections
     });
 
     return state;
@@ -713,16 +1003,214 @@ async function handleMissingCandidate(tabId, payload) {
   }));
 }
 
+async function handleEscapeSnapshot(tabId, payload) {
+  let escapeResult = {
+    turn: Number(payload?.turn || 0) || null,
+    saveStateAfter: "not_processed",
+    reason: null,
+    downloadCalled: false
+  };
+  return withState(async (state) => {
+    const bindingCheck = validateTurnBinding(state, tabId, payload?.nodeBinding);
+    if (!bindingCheck.ok) {
+      escapeResult = {
+        turn: Number(payload?.turn || 0) || null,
+        saveStateAfter: "save_error",
+        reason: bindingCheck.reason,
+        downloadCalled: false
+      };
+      recordSaveError(state, tabId, payload, bindingCheck.reason);
+      notifyTab(tabId, {
+        type: "ESCAPE_ERROR",
+        conversationKey: payload?.nodeBinding?.conversationKey || "unknown",
+        turn: Number(payload?.turn || 0) || null,
+        reason: bindingCheck.reason
+      });
+      return state;
+    }
+
+    const turn = Number(payload?.turn || 0) || null;
+    const assistantText = String(payload?.assistantText || "").trim();
+    if (!assistantText) {
+      escapeResult = {
+        turn,
+        saveStateAfter: "save_error",
+        reason: "empty_escape_body",
+        downloadCalled: false
+      };
+      return state;
+    }
+
+    const conversation = ensureConversation(state, bindingCheck.conversationKey);
+    if (turn) {
+      updateLastSeenTurn(state, conversation, turn, tabId);
+    }
+    const rawHash = await sha256(assistantText);
+    const normalizedHash = await sha256(normalizeSnapshotForHash(assistantText));
+    const duplicate = (conversation.escapeRecords || []).find((record) => (
+      Number(record.turn || 0) === Number(turn || 0) &&
+      record.normalizedHash === normalizedHash &&
+      record.saveState === "save_confirmed"
+    ));
+    if (duplicate) {
+      appendEvent(state, {
+        type: "escape_duplicate_ignored",
+        conversationKey: conversation.conversationKey,
+        turn,
+        normalizedHash,
+        filePath: duplicate.filePath || null
+      });
+      escapeResult = {
+        conversationKey: conversation.conversationKey,
+        turn,
+        saveStateAfter: "duplicate_ignored",
+        reason: "duplicate_escape_checkpoint",
+        downloadCalled: false,
+        filePath: duplicate.filePath || null,
+        actualPath: duplicate.actualPath || null
+      };
+      notifyTab(tabId, {
+        type: "ESCAPE_CONFIRMED",
+        turn,
+        conversationKey: conversation.conversationKey,
+        filePath: duplicate.filePath || null,
+        actualPath: duplicate.actualPath || null,
+        duplicate: true
+      });
+      return state;
+    }
+
+    const runtimeMetadata = buildRuntimeMetadata(payload.source || "manual_escape");
+    const filePath = buildEscapeSnapshotPath(conversation, turn, normalizedHash);
+    const markdown = buildEscapeMarkdown({
+      conversation,
+      turn,
+      rawHash,
+      normalizedHash,
+      filePath,
+      assistantText,
+      binding: payload.nodeBinding,
+      markerStatus: payload.markerStatus || {},
+      turnSource: payload.turnSource || null,
+      sourceTextLength: payload.sourceTextLength || assistantText.length,
+      truncated: Boolean(payload.truncated),
+      scanMode: payload.source || "manual_escape"
+    });
+
+    let writeResult;
+    try {
+      writeResult = await writeSnapshotFileToTab(tabId, filePath, markdown);
+    } catch (error) {
+      const reason = String(error?.message || error || "file_system_write_failed");
+      appendEvent(state, {
+        type: "escape_save_error",
+        conversationKey: conversation.conversationKey,
+        turn,
+        normalizedHash,
+        rawHash,
+        filePath,
+        reason
+      });
+      notifyTab(tabId, {
+        type: "ESCAPE_ERROR",
+        conversationKey: conversation.conversationKey,
+        turn,
+        reason
+      });
+      escapeResult = {
+        conversationKey: conversation.conversationKey,
+        turn,
+        saveStateAfter: "save_error",
+        reason,
+        downloadCalled: false,
+        writer: "file_system_access",
+        filePath
+      };
+      return state;
+    }
+
+    const record = {
+      turn,
+      recordType: "escape",
+      saveState: "save_confirmed",
+      normalizedHash,
+      rawHash,
+      downloadId: null,
+      writeId: writeResult.writeId,
+      filePath,
+      actualPath: writeResult.actualPath,
+      writer: writeResult.writer,
+      ...runtimeMetadata,
+      turnSource: payload.turnSource || null,
+      sourceTextLength: payload.sourceTextLength || assistantText.length,
+      truncated: Boolean(payload.truncated),
+      reason: "manual_escape",
+      timestamps: {
+        detectedAt: payload.detectedAt || nowIso(),
+        confirmedAt: nowIso()
+      }
+    };
+    conversation.escapeRecords = [...(conversation.escapeRecords || []), record].slice(-100);
+    appendEvent(state, {
+      type: "escape_save_confirmed",
+      conversationKey: conversation.conversationKey,
+      turn,
+      normalizedHash,
+      rawHash,
+      writeId: writeResult.writeId,
+      filePath,
+      actualPath: writeResult.actualPath
+    });
+    notifyTab(tabId, {
+      type: "ESCAPE_CONFIRMED",
+      turn,
+      conversationKey: conversation.conversationKey,
+      filePath,
+      actualPath: writeResult.actualPath
+    });
+    escapeResult = {
+      conversationKey: conversation.conversationKey,
+      turn,
+      saveStateAfter: "save_confirmed",
+      downloadCalled: false,
+      writer: "file_system_access",
+      writeId: writeResult.writeId,
+      filePath,
+      actualPath: writeResult.actualPath
+    };
+    return state;
+  }).then((state) => ({
+    status: getTabConversationStatus(state, tabId),
+    escapeResult
+  }));
+}
+
 async function handleInvalidSnapshot(tabId, payload) {
   return withState(async (state) => {
     const bindingCheck = validateBinding(state, tabId, payload?.nodeBinding);
     if (!bindingCheck.ok) {
+      if (isStaleBindingReason(bindingCheck.reason)) {
+        appendEvent(state, {
+          type: "invalid_snapshot_stale_ignored",
+          tabId,
+          turn: Number(payload?.turn || 0) || null,
+          reason: bindingCheck.reason
+        });
+        updateAutoCaptureGuard(state, ensureConversation(state, payload?.nodeBinding?.conversationKey || "unknown"), {
+          type: "stale",
+          tabId,
+          source: payload?.source || null,
+          turn: Number(payload?.turn || 0) || null
+        });
+        return state;
+      }
       recordSaveError(state, tabId, payload, bindingCheck.reason);
       return state;
     }
     const conversationKey = bindingCheck.conversationKey || payload?.nodeBinding?.conversationKey || "unknown";
     const conversation = ensureConversation(state, conversationKey);
     const turn = Number(payload.turn);
+    const runtimeMetadata = buildRuntimeMetadata(payload.source || null);
     const existing = conversation.turns[String(turn)];
     if (existing?.recordType === "invalid_snapshot" && existing.eventKey && existing.eventKey === payload.eventKey) {
       appendEvent(state, {
@@ -742,6 +1230,7 @@ async function handleInvalidSnapshot(tabId, payload) {
       rawHash: null,
       downloadId: null,
       filePath: null,
+      ...runtimeMetadata,
       markerStatus: payload.markerStatus || {},
       reason: payload.reason || "invalid_snapshot_marker",
       eventKey: payload.eventKey || null,
@@ -787,6 +1276,7 @@ async function retrySave(tabId, payload) {
       throw new Error("No pending/error body available for manual retry");
     }
 
+    const previousRecord = conversation.turns[String(turn)] || null;
     const filePath = body.filePath && folderPathMatchesConversation(conversation, body.filePath)
       ? body.filePath
       : buildSnapshotPath(conversation, turn, "saved", body.normalizedHash);
@@ -798,7 +1288,8 @@ async function retrySave(tabId, payload) {
       normalizedHash: body.normalizedHash,
       filePath,
       snapshotText: body.snapshotText,
-      binding: { conversationKey }
+      binding: { conversationKey },
+      scanMode: "manual_retry"
     });
     let writeResult;
     try {
@@ -849,7 +1340,7 @@ async function retrySave(tabId, payload) {
       }
     };
     deletePendingBodyForConversationTurn(state, conversationKey, turn);
-    conversation.savedTurns = uniqueNumbers([...(conversation.savedTurns || []), turn]);
+    markTurnSaved(conversation, turn, previousRecord, "manual_retry");
 
     appendEvent(state, {
       type: "manual_retry_confirmed",
@@ -940,8 +1431,9 @@ function validateBinding(state, tabId, binding) {
       bindingConversationKey: binding.conversationKey,
       currentEpoch: tab.navigationEpoch,
       captureEpoch: binding.navigationEpoch,
-      decision: "use_node_binding"
+      decision: "reject_stale_binding"
     });
+    return { ok: false, reason: "stale_node_binding" };
   }
   debugLog("[SK binding]", {
     nodeBindingConversationKey: binding.conversationKey,
@@ -1015,8 +1507,10 @@ function validateTurnBinding(state, tabId, binding) {
       currentConversationKey: tab.currentConversationKey,
       bindingConversationKey: binding.conversationKey,
       currentEpoch: tab.navigationEpoch,
-      captureEpoch: binding.navigationEpoch
+      captureEpoch: binding.navigationEpoch,
+      decision: "reject_stale_binding"
     });
+    return { ok: false, reason: "stale_node_binding" };
   }
 
   return {
@@ -1059,7 +1553,7 @@ function recordSaveError(state, tabId, payload, reason) {
 
 async function handleQaDownloadTest(tabId, payload) {
   const stamp = formatTimestampForPath(new Date());
-  const filePath = `_qa/${stamp}__download_test.md`;
+  const filePath = `qa/${stamp}__download_test.md`;
   const markdown = [
     "---",
     "status: qa_download_test",
@@ -1174,6 +1668,15 @@ function buildSnapshotPath(conversation, turn, status, hash) {
   return `${folderPath}/${turnPart}__${stamp}__saved.md`;
 }
 
+function buildEscapeSnapshotPath(conversation, turn, hash) {
+  const date = new Date();
+  const month = formatDatePart(date).slice(0, 7);
+  const stamp = formatTimestampForPath(date);
+  const folderPath = ensureConversationFolderPath(conversation, month, stamp);
+  const turnPart = `turn_${String(Number(turn || 0)).padStart(4, "0")}`;
+  return `${folderPath}/escape/${turnPart}__${safeToken(hash, 10)}__${stamp}__escape.md`;
+}
+
 function ensureConversationFolderPath(conversation, month, stamp) {
   const shortId = conversationShortId(conversation.conversationKey);
   if (conversation.folderPathSchema === PATH_SCHEMA_VERSION && conversation.folderPath && folderPathMatchesConversation(conversation, conversation.folderPath)) {
@@ -1228,10 +1731,21 @@ function folderPathMatchesConversationKey(conversationKey, filePath) {
   return Boolean(folderSegment);
 }
 
-function buildSavedMarkdown({ conversation, turn, status, rawHash, normalizedHash, filePath, snapshotText, binding }) {
+function buildSavedMarkdown({ conversation, turn, status, rawHash, normalizedHash, filePath, snapshotText, binding, scanMode = null, variantMetadata = null }) {
+  const variantFrontMatter = variantMetadata ? [
+    `variantOfTurn: ${variantMetadata.variantOfTurn}`,
+    `baseHash: ${yamlString(variantMetadata.baseHash || "")}`,
+    `baseRawHash: ${yamlString(variantMetadata.baseRawHash || "")}`,
+    `baseFilePath: ${yamlString(variantMetadata.baseFilePath || "")}`,
+    `baseRecordType: ${yamlString(variantMetadata.baseRecordType || "")}`,
+    `baseSaveState: ${yamlString(variantMetadata.baseSaveState || "")}`,
+    `variantReason: ${yamlString(variantMetadata.variantReason || "normalized_hash_changed")}`,
+    `scanCause: ${yamlString(variantMetadata.scanCause || "")}`
+  ] : [];
   return [
     "---",
     `status: ${status}`,
+    ...runtimeFrontMatter(scanMode),
     `conversationKey: ${yamlString(conversation.conversationKey)}`,
     `conversationUrl: ${yamlString(binding?.url || "")}`,
     `turn: ${turn}`,
@@ -1239,6 +1753,7 @@ function buildSavedMarkdown({ conversation, turn, status, rawHash, normalizedHas
     `rawHash: ${yamlString(rawHash)}`,
     `normalizedHash: ${yamlString(normalizedHash)}`,
     `filePath: ${yamlString(filePath)}`,
+    ...variantFrontMatter,
     "---",
     "",
     `# turn ${turn} snapshot`,
@@ -1248,10 +1763,24 @@ function buildSavedMarkdown({ conversation, turn, status, rawHash, normalizedHas
   ].join("\n");
 }
 
-function buildMissingMarkdown({ conversation, turn, filePath, markerStatus, missingSections, reason, binding }) {
+function buildVariantMetadata(existing, turn, scanCause) {
+  return {
+    variantOfTurn: Number(existing?.turn || turn),
+    baseHash: existing?.normalizedHash || null,
+    baseRawHash: existing?.rawHash || null,
+    baseFilePath: existing?.filePath || null,
+    baseRecordType: existing?.recordType || null,
+    baseSaveState: existing?.saveState || null,
+    variantReason: "normalized_hash_changed",
+    scanCause: scanCause || null
+  };
+}
+
+function buildMissingMarkdown({ conversation, turn, filePath, markerStatus, missingSections, reason, binding, scanMode = null }) {
   return [
     "---",
     "status: missing",
+    ...runtimeFrontMatter(scanMode),
     `conversationKey: ${yamlString(conversation.conversationKey)}`,
     `conversationUrl: ${yamlString(binding?.url || "")}`,
     `turn: ${turn}`,
@@ -1271,6 +1800,62 @@ function buildMissingMarkdown({ conversation, turn, filePath, markerStatus, miss
     "Snapshot body is intentionally not stored for missing records.",
     ""
   ].join("\n");
+}
+
+function buildEscapeMarkdown({ conversation, turn, rawHash, normalizedHash, filePath, assistantText, binding, markerStatus, turnSource, sourceTextLength, truncated, scanMode = null }) {
+  return [
+    "---",
+    "status: escape",
+    ...runtimeFrontMatter(scanMode),
+    `conversationKey: ${yamlString(conversation.conversationKey)}`,
+    `conversationUrl: ${yamlString(binding?.url || "")}`,
+    `turn: ${Number(turn || 0)}`,
+    `turnSource: ${yamlNullable(turnSource)}`,
+    `detectedAt: ${yamlString(nowIso())}`,
+    "reason: \"manual_escape\"",
+    "privacyBoundary: \"manual_user_triggered_latest_assistant_only\"",
+    `sourceTextLength: ${Number(sourceTextLength || assistantText.length || 0)}`,
+    `truncated: ${Boolean(truncated)}`,
+    `rawHash: ${yamlString(rawHash)}`,
+    `normalizedHash: ${yamlString(normalizedHash)}`,
+    `filePath: ${yamlString(filePath)}`,
+    "markerStatus:",
+    `  hasStart: ${Boolean(markerStatus?.hasStart)}`,
+    `  hasEnd: ${Boolean(markerStatus?.hasEnd)}`,
+    `  markerTurn: ${markerStatus?.markerTurn ?? "null"}`,
+    "---",
+    "",
+    `# turn ${turn || "unknown"} escape checkpoint`,
+    "",
+    "Manual escape checkpoint. This is not a model-compliant Snapshot Keeper block.",
+    "",
+    assistantText.trim(),
+    ""
+  ].join("\n");
+}
+
+function runtimeFrontMatter(scanMode) {
+  return [
+    `appVersion: ${yamlString(APP_VERSION)}`,
+    `gitCommit: ${yamlNullable(GIT_COMMIT)}`,
+    `testMode: ${yamlNullable(TEST_MODE)}`,
+    `scanMode: ${yamlNullable(scanMode)}`,
+    `uiState: ${yamlNullable(UI_STATE)}`,
+    `pathSchemaVersion: ${PATH_SCHEMA_VERSION}`,
+    `writer: ${yamlString(FILE_WRITER)}`
+  ];
+}
+
+function buildRuntimeMetadata(scanMode) {
+  return {
+    appVersion: APP_VERSION,
+    gitCommit: GIT_COMMIT,
+    testMode: TEST_MODE,
+    scanMode: scanMode || null,
+    uiState: UI_STATE,
+    pathSchemaVersion: PATH_SCHEMA_VERSION,
+    writer: FILE_WRITER
+  };
 }
 
 function updateLastSeenTurn(state, conversation, turn, tabId) {
@@ -1316,6 +1901,7 @@ function updateVisibleTurn(state, tabId, conversationKey, turn, source) {
   tab.visibleTurn = turn;
   tab.visibleTurnSource = source || null;
   tab.visibleTurnSeenAt = nowIso();
+  tab.visibleTurnSyncPending = false;
   appendEvent(state, {
     type: "visible_turn_updated",
     conversationKey,
@@ -1345,24 +1931,152 @@ function getConversationStatus(state, conversationKey, tabContext = null) {
   const visibleTurn = tabContext?.currentConversationKey === conversation.conversationKey
     ? Number(tabContext.visibleTurn || 0)
     : 0;
-  const displayTurn = visibleTurn || Number(conversation.lastSeenTurn || 0);
+  const storedLastSeenTurn = Number(conversation.lastSeenTurn || 0);
+  const visibleTurnSyncPending = Boolean(
+    tabContext?.currentConversationKey === conversation.conversationKey &&
+    tabContext.visibleTurnSyncPending &&
+    !visibleTurn
+  );
+  const storageAheadOfVisible = Boolean(visibleTurn && storedLastSeenTurn && visibleTurn < storedLastSeenTurn);
+  const displayTurn = visibleTurn || (visibleTurnSyncPending ? 0 : storedLastSeenTurn);
+  const latestForDisplay = (storageAheadOfVisible || visibleTurnSyncPending) ? null : latest;
 
   return {
     conversationKey: conversation.conversationKey,
     displayTitle: conversation.displayTitle,
-    lastSeenTurn: conversation.lastSeenTurn || 0,
+    lastSeenTurn: storedLastSeenTurn,
     visibleTurn,
     visibleTurnSource: tabContext?.visibleTurnSource || null,
     visibleTurnSeenAt: tabContext?.visibleTurnSeenAt || null,
+    visibleTurnSyncPending,
+    storageAheadOfVisible,
     displayTurn,
     nextSnapshotTurn: nextSnapshotTurn(displayTurn),
-    storedNextSnapshotTurn: conversation.nextSnapshotTurn || nextSnapshotTurn(conversation.lastSeenTurn || 0),
+    storedNextSnapshotTurn: conversation.nextSnapshotTurn || nextSnapshotTurn(storedLastSeenTurn),
     savedCount: (conversation.savedTurns || []).length,
     missingCount: (conversation.missingTurns || []).length,
     variantCount: (conversation.variantTurns || []).length,
-    latest,
+    escapeCount: (conversation.escapeRecords || []).filter((record) => record?.saveState === "save_confirmed").length,
+    autoCaptureDisabled: Boolean(conversation.autoCaptureDisabled),
+    autoCaptureDisabledReason: conversation.autoCaptureDisabledReason || null,
+    latest: latestForDisplay,
     folderPath: conversation.folderPath || null
   };
+}
+
+function updateAutoCaptureGuard(state, conversation, sample) {
+  if (!conversation || !sample) {
+    return;
+  }
+  const now = Date.now();
+  const recent = (conversation.autoGuardSamples || []).filter((entry) => now - Number(entry.t || 0) < AUTO_GUARD_WINDOW_MS);
+  recent.push({
+    t: now,
+    type: sample.type || "unknown",
+    source: sample.source || null,
+    turn: Number(sample.turn || 0) || null,
+    pathChanged: Boolean(sample.pathChanged),
+    conversationChanged: Boolean(sample.conversationChanged),
+    reason: sample.reason || null
+  });
+  conversation.autoGuardSamples = recent.slice(-80);
+  if (conversation.autoCaptureDisabled) {
+    return;
+  }
+  const pathChurn = recent.filter((entry) => entry.type === "context" && entry.pathChanged && !entry.conversationChanged).length;
+  const staleCount = recent.filter((entry) => entry.type === "stale").length;
+  const missingCount = recent.filter((entry) => entry.type === "missing" && entry.source === "latest").length;
+  const turnCounts = {};
+  for (const entry of recent) {
+    if (entry.type === "turn_seen" && entry.source === "latest" && entry.turn) {
+      turnCounts[String(entry.turn)] = Number(turnCounts[String(entry.turn)] || 0) + 1;
+    }
+  }
+  const repeatedTurn = Object.entries(turnCounts).find(([, count]) => count >= AUTO_GUARD_REPEAT_TURN_LIMIT);
+  let reason = null;
+  if (pathChurn >= AUTO_GUARD_PATH_CHURN_LIMIT) {
+    reason = repeatedTurn
+      ? `path_churn_repeated_turn_${repeatedTurn[0]}`
+      : "path_churn";
+  } else if (staleCount >= AUTO_GUARD_STALE_LIMIT) {
+    reason = "stale_binding_churn";
+  } else if (missingCount >= AUTO_GUARD_MISSING_LIMIT) {
+    reason = "repeated_live_missing";
+  }
+  if (!reason) {
+    return;
+  }
+  conversation.autoCaptureDisabled = true;
+  conversation.autoCaptureDisabledReason = reason;
+  conversation.autoCaptureDisabledAt = nowIso();
+  appendEvent(state, {
+    type: "auto_capture_disabled_for_conversation",
+    conversationKey: conversation.conversationKey,
+    reason,
+    pathChurn,
+    staleCount,
+    missingCount,
+    repeatedTurn: repeatedTurn ? Number(repeatedTurn[0]) : null
+  });
+}
+
+async function clearAutoCaptureGuard(tabId) {
+  const state = await withState(async (draft) => {
+    const context = getTabContextSnapshot(draft, tabId);
+    const conversation = context?.currentConversationKey
+      ? draft.conversations?.[context.currentConversationKey]
+      : null;
+    if (!conversation) {
+      appendEvent(draft, {
+        type: "auto_capture_guard_clear_skipped",
+        tabId,
+        reason: "conversation_not_found"
+      });
+      return draft;
+    }
+    const wasDisabled = Boolean(conversation.autoCaptureDisabled);
+    delete conversation.autoCaptureDisabled;
+    delete conversation.autoCaptureDisabledReason;
+    delete conversation.autoCaptureDisabledAt;
+    conversation.autoGuardSamples = [];
+    appendEvent(draft, {
+      type: "auto_capture_guard_cleared",
+      tabId,
+      conversationKey: conversation.conversationKey,
+      wasDisabled
+    });
+    return draft;
+  });
+  const context = getTabContextSnapshot(state, tabId);
+  return {
+    context,
+    status: getConversationStatus(state, context?.currentConversationKey, context)
+  };
+}
+
+async function openArchiveFolder() {
+  const folderUrl = toFileUrl(DEFAULT_ARCHIVE_FOLDER);
+  try {
+    await chrome.tabs.create({ url: folderUrl, active: true });
+    return {
+      opened: true,
+      absolutePath: DEFAULT_ARCHIVE_FOLDER,
+      folderUrl,
+      openMode: "file_tab"
+    };
+  } catch (error) {
+    return {
+      opened: false,
+      absolutePath: DEFAULT_ARCHIVE_FOLDER,
+      folderUrl,
+      error: String(error?.message || error)
+    };
+  }
+}
+
+function toFileUrl(absolutePath) {
+  const normalized = String(absolutePath || "").replace(/\\/g, "/");
+  return encodeURI(`file:///${normalized}`);
 }
 
 function getTabContextSnapshot(state, tabId) {
@@ -1397,14 +2111,6 @@ function prunePendingBodies(state) {
 
   state.pendingBodies = Object.fromEntries(entries.filter(([key, body]) => !body.lastError || keepErrorKeys.has(key)));
   return state;
-}
-
-function notifyConversationTabs(state, conversationKey, message) {
-  for (const tab of Object.values(state.tabs || {})) {
-    if (tab.currentConversationKey === conversationKey) {
-      notifyTab(tab.tabId, message);
-    }
-  }
 }
 
 function notifyTab(tabId, message) {
@@ -1446,17 +2152,6 @@ async function sha256(text) {
   return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
-function textToDataUrl(text, mimeType) {
-  const bytes = new TextEncoder().encode(text);
-  let binary = "";
-  const chunkSize = 0x8000;
-  for (let index = 0; index < bytes.length; index += chunkSize) {
-    const chunk = bytes.subarray(index, index + chunkSize);
-    binary += String.fromCharCode(...chunk);
-  }
-  return `data:${mimeType};base64,${btoa(binary)}`;
-}
-
 function bodyStorageKey(conversationKey, turn, normalizedHash) {
   return `${conversationKey}::${turn}::${normalizedHash}`;
 }
@@ -1485,6 +2180,10 @@ function uniqueStrings(values) {
 
 function yamlString(value) {
   return JSON.stringify(String(value ?? ""));
+}
+
+function yamlNullable(value) {
+  return value === null || value === undefined || value === "" ? "null" : yamlString(value);
 }
 
 function nowIso() {

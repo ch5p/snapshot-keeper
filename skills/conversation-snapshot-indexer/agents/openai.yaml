@@ -1,0 +1,4 @@
+interface:
+  display_name: "Conversation Snapshot Indexer"
+  short_description: "Incrementally indexes Snapshot Keeper markdown files for Korean local search and handoff."
+  icon: "🗂️"
