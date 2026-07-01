@@ -25,6 +25,7 @@ import argparse
 import html
 import re
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -584,7 +585,7 @@ def page_shell(title: str, topbar_html: str, body_html: str, css_href: Optional[
 """
 
 
-def render_index(notes: List[Note], pending_project_jobs: int) -> str:
+def render_index(notes: List[Note], pending_project_jobs: int, generated_iso: str, generated_label: str) -> str:
     topbar = (
         '<div class="topbar"><div class="inner">'
         '<span class="brand"><span class="dot"></span>ChatGPT Snapshot Archive</span>'
@@ -632,18 +633,18 @@ def render_index(notes: List[Note], pending_project_jobs: int) -> str:
     if pending_project_jobs:
         sync_class = "pending"
         sync_title = f"Archive Sync 대기 {pending_project_jobs}개 존재"
-        sync_detail = "프로젝트 폴더의 원본 스냅샷을 스킬로 정리하세요."
+        sync_detail = f"{generated_label} 기준 상태입니다."
     else:
         sync_class = "complete"
         sync_title = "Archive Sync 완료"
-        sync_detail = "프로젝트 폴더에 남은 원본 스냅샷 없음."
+        sync_detail = f"{generated_label} 기준 상태입니다."
 
     body = f"""<h1 class="page">보관된 대화 아카이브</h1>
-<div class="sync-banner {sync_class}">
+<div class="sync-banner {sync_class}" data-generated-at="{html.escape(generated_iso, quote=True)}">
   <span class="signal"></span>
   <span class="copy">
-    <span class="title">{html.escape(sync_title)}</span>
-    <span class="detail">{html.escape(sync_detail)}</span>
+    <span class="title" data-sync-title="{html.escape(sync_title, quote=True)}">{html.escape(sync_title)}</span>
+    <span class="detail" data-sync-detail="{html.escape(sync_detail, quote=True)}">{html.escape(sync_detail)}</span>
   </span>
 </div>
 <input id="q" class="search" type="search" placeholder="제목 · 선요약 · 키워드 검색…" autocomplete="off">
@@ -653,6 +654,22 @@ def render_index(notes: List[Note], pending_project_jobs: int) -> str:
 <div class="empty" id="empty" style="display:none">검색 결과가 없습니다.</div>
 <script>
 const q=document.getElementById('q'),cards=[...document.querySelectorAll('.card')],empty=document.getElementById('empty');
+const syncBanner=document.querySelector('.sync-banner');
+if(syncBanner){{
+  const generatedAt=new Date(syncBanner.dataset.generatedAt);
+  const title=syncBanner.querySelector('[data-sync-title]');
+  const detail=syncBanner.querySelector('[data-sync-detail]');
+  if(!Number.isNaN(generatedAt.getTime())&&title&&detail){{
+    const dayMs=24*60*60*1000;
+    const today=new Date(); today.setHours(0,0,0,0);
+    const generatedDay=new Date(generatedAt); generatedDay.setHours(0,0,0,0);
+    const elapsedDays=Math.max(0,Math.floor((today-generatedDay)/dayMs));
+    title.textContent=`${{title.dataset.syncTitle}} · 마지막 갱신 +${{elapsedDays}}일 경과`;
+    detail.textContent=elapsedDays>=2
+      ? `${{detail.dataset.syncDetail}} 문서 갱신하세요.`
+      : detail.dataset.syncDetail;
+  }}
+}}
 q.addEventListener('input',()=>{{
   const t=q.value.trim().toLowerCase();let shown=0;
   cards.forEach(c=>{{const hit=!t||c.dataset.search.includes(t);c.style.display=hit?'':'none';if(hit)shown++;}});
@@ -818,7 +835,13 @@ def main() -> None:
         )
 
     pending_project_jobs = count_project_snapshot_jobs(project_root_from_script())
-    (root / "index.html").write_text(render_index(notes, pending_project_jobs), encoding="utf-8")
+    generated_at = datetime.now().astimezone()
+    generated_iso = generated_at.isoformat(timespec="minutes")
+    generated_label = generated_at.strftime("%Y.%m.%d")
+    (root / "index.html").write_text(
+        render_index(notes, pending_project_jobs, generated_iso, generated_label),
+        encoding="utf-8",
+    )
 
     readme_changed = False
     if not args.no_readme:
