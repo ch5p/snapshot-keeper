@@ -32,7 +32,7 @@ Root rules:
 - Keep the archive root easy to scan. It should show only the main folders and one `README.md` file.
 - Do not create root-level month folders such as `2026-06`.
 - Do not create extra root summary files. Update the root `README.md` instead.
-- Do not put runtime snapshot outputs directly inside a source-code repository root.
+- Runtime snapshot outputs may appear under the app/project root `D:\_my_tools\ChatGPT_Snapshot\YYYY-MM\...` as pending jobs. This is the extension's active save area, not the final archive.
 - `snapshots/` may be deep and machine-friendly because it stores source evidence.
 - `archive/` must stay flat because it is the human-facing handoff folder.
 - `index/` stores global search indexes only.

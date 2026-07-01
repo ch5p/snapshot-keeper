@@ -34,8 +34,8 @@ Important regression guard: content sends current page URL as `{ payload: { url 
 | 문서 기준 | `README.md`는 선택한 폴더를 저장 루트로 보고, 그 아래 `YYYY-MM/YYYY-MM-DD_HHMMSS__conversationId/turn_0000__timestamp__status.md` 구조를 예시로 둔다. |
 | 실제 샘플 | 현재 repo 루트에 `2026-06/2026-06-26_062911__c-.../turn_0020__...__saved.md`, `missing/`, `variants/`가 존재한다. |
 | 코드 가정 | `background/service-worker.js`의 `buildSnapshotPath()`가 월 폴더, conversation 폴더, 긴 turn 파일명을 생성한다. `content/content-script.js`는 사용자가 고른 File System Access 폴더를 그대로 루트로 사용한다. |
-| 불일치 | 기능상 불일치는 없지만, 운영상 repo 루트에 runtime snapshot이 섞이는 문제가 있다. |
-| 처리 방향 | 확장프로그램 저장 루트는 코드 repo 밖의 `D:\_my_tools\ChatGPT_Snapshot_Archive\snapshots` 계열로 유도하고, 사람이 보는 handoff/archive는 별도 정리 스킬에서 생성한다. |
+| 불일치 | 없음. 확장프로그램은 사용자가 고른 app/project root에 pending snapshot job을 만든다. |
+| 처리 방향 | 확장프로그램 저장 루트는 `D:\_my_tools\ChatGPT_Snapshot`로 유지한다. 사람이 보는 archive/index/HTML은 별도 정리 스킬이 `D:\_my_tools\ChatGPT_Snapshot_Archive`에 생성한다. |
 
 ## Current Project State
 
@@ -46,7 +46,7 @@ Important regression guard: content sends current page URL as `{ payload: { url 
   - `content/content-script.js`: ChatGPT DOM detection, parser, floating bar, directory picker, relative file writing.
   - `content/floating-bar.css`: compact/expanded bar styling.
   - `options/`: extension options and privacy text.
-- Runtime output folders such as `2026-*/` are already ignored by `.gitignore`, but should not be created in the repo root during normal use.
+- Runtime output folders such as `2026-*/` are expected pending job folders in this app/project root. They are ignored by `.gitignore` and should be removed from the active root only after the archive skill has copied/indexed them.
 
 ## Current Save Behavior
 
@@ -136,10 +136,10 @@ The desired split:
 
 Option A: no extension code change.
 
-- User selects `D:\_my_tools\ChatGPT_Snapshot_Archive\snapshots` as the extension save folder.
-- Extension continues producing its current long file paths.
-- Archive/indexing skill later normalizes or summarizes them.
-- Lowest risk.
+- User selects `D:\_my_tools\ChatGPT_Snapshot` as the extension save folder.
+- Extension continues producing its current long file paths under project-root month folders.
+- Archive/indexing skill later copies, normalizes, indexes, and moves processed project-root pending folders out of the active root.
+- This matches the current app workflow.
 
 Option B: update extension path schema.
 

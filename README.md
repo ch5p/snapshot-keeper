@@ -52,13 +52,13 @@ The extension writes files through the File System Access API.
 
 The selected folder is treated as the root. The extension does not add an extra `ChatGPT-Snapshots/` wrapper.
 
-Recommended personal archive root:
+Recommended extension save root:
 
 ```text
-D:\_my_tools\ChatGPT_Snapshot_Archive\snapshots
+D:\_my_tools\ChatGPT_Snapshot
 ```
 
-This keeps runtime snapshots outside the extension source repository. The source repository may still contain old ignored `2026-*/` QA output, but normal use should select the external archive `snapshots` folder instead.
+Snapshot Keeper stores pending source jobs inside this app/project folder. Month folders such as `2026-07/` are expected while work is waiting for the archive skill. The archive skill later copies/normalizes them into `D:\_my_tools\ChatGPT_Snapshot_Archive\snapshots` and moves processed project-root folders out of the active root.
 
 Example relative path:
 
@@ -68,7 +68,7 @@ Example relative path:
 
 ## Archive Workflow
 
-The extension only writes conservative source snapshots. Human-facing archive notes, handoff notes, and global search indexes are handled outside the extension by the snapshot archive workflow.
+The extension only writes conservative source snapshots into the app/project folder. Human-facing archive notes, handoff notes, and global search indexes are handled outside the extension by the snapshot archive workflow.
 
 Recommended archive root:
 
